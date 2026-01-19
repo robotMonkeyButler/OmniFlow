@@ -1,0 +1,157 @@
+# ============================================================
+# OmniFlow Configuration
+# ============================================================
+
+# ----------------------
+# Model Architecture
+# ----------------------
+model:
+  d_model: 256
+  nhead: 8
+  num_layers: 4
+  measure_dim: 256       
+  dropout: 0.1
+  share_layers: false
+  adapter_hidden: 512
+
+# ----------------------
+# Geometry (α-divergence)
+# ----------------------
+geometry:
+  alpha_init:
+    vis: 0.0
+    aud: 0.0
+    txt: 0.0
+  p_min: 1.001
+  p_max: 50.0
+  eps: 1.0e-8
+  m_min: 1.0e-3
+  m_max: 1.0e+3
+  w_max: 1.0e+6
+  prior_scale: 1.0
+  prior_type: "lognormal"    # "lognormal" 或 "softplus"
+
+# ----------------------
+# Masking
+# ----------------------
+masking:
+  span_len:
+    vis: 6
+    aud: 6
+    txt: 3
+  w_masked: 1.0
+  w_visible: 0.05
+
+# ----------------------
+# Flow
+# ----------------------
+flow:
+  t_max: 1.0
+  t_gamma: 1.0              # <1 偏向 t=1
+  normalize_by_geometry: true
+
+# ----------------------
+# Text Adapter (Gumbel-Softmax)
+# ----------------------
+text_adapter:
+  txt_usage_weight: 0.05
+  use_gumbel: true
+
+# ----------------------
+# Training
+# ----------------------
+training:
+  batch_size: 32
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+
+  # Stage 1: Geometry Learning
+  stage1:
+    max_epochs: 10
+    patience: 12
+    base_lr: 1.0e-4
+    alpha_lr: 5.0e-3
+    cross_attention: false
+    t_gamma: 0.5
+    mask_ratio:
+      vis: 0.6
+      aud: 0.6
+      txt: 0.4
+    w_visible: 0.0
+    txt_usage_weight: 0.05
+    gumbel:
+      tau_start: 1.0
+      tau_end: 0.5
+
+  # Stage 2: Joint Training
+  stage2:
+    max_epochs: 50
+    patience: 18
+    lr: 1.0e-4
+    cross_warmup: 0
+    t_gamma: 0.5
+    mask_ratio:
+      vis: 0.5
+      aud: 0.5
+      txt: 0.15
+    w_visible: 0.05
+    txt_usage_weight: 0.03
+    gumbel:
+      tau_start: 0.6
+      tau_end: 0.3
+    # 非对称 masking
+    asym_mask:
+      enabled: true
+      low_ratio: 0.1
+      high_ratio_vis_aud: 0.6
+      high_ratio_txt: 0.4
+
+  # Classification
+  classification:
+    max_epochs: 100
+    patience: 15
+    lr: 1.0e-3
+    t_star: 1.0
+    hidden_dims: [256, 128]
+    dropout: 0.4
+
+  supervised_ft:
+    max_epochs: 20
+    patience: 8
+    t_star: 1.0
+
+    unfreeze_last_k: 2
+    train_vf_inout_proj: true
+
+    freeze_adapters: false          # 关键：必须是 false
+    unfreeze_projs: true
+    unfreeze_adapters_partial: true
+
+    lr_vf: 3.0e-5
+    lr_projs: 1.0e-4
+    lr_adapters: 3.0e-5
+    lr_head: 1.0e-3
+
+    weight_decay: 1.0e-4
+    log_grads: true
+    t_combo:
+      t_list: [0.6, 0.8, 1.0]
+      t_weights: [0.2, 0.3, 0.5]
+
+
+
+# ----------------------
+# Dataset
+# ----------------------
+dataset:
+  name: "urfunny"
+  modality_keys:
+    mosei:
+      vis: "vision"
+      aud: "audio"
+      txt: "text"
+    urfunny:
+      vis: "vision"
+      aud: "audio"
+      txt: "text"
+
