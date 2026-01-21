@@ -9,7 +9,7 @@ model:
   d_model: 256
   nhead: 8
   num_layers: 4
-  measure_dim: 256       
+  measure_dim: 256        # 如果为 null，使用 d_model
   dropout: 0.1
   share_layers: false
   adapter_hidden: 512
@@ -58,6 +58,30 @@ text_adapter:
   use_gumbel: true
 
 # ----------------------
+# Representation Extraction
+# ----------------------
+representation:
+  # Mode choices:
+  #   - hidden_mean            : mean-pooled hidden states only (d_model * 3)
+  #   - hidden_attn            : attention-pooled hidden states only (d_model * 3)
+  #   - hidden_attn_vel_x1     : hidden + velocity at x1 (d_model * 6)
+  #   - hidden_attn_vel_detprior : hidden + velocity at x_t with deterministic prior (d_model * 6)
+  mode: "hidden_attn"
+
+  # Whether to project velocity u_hat (measure_dim) -> d_model before pooling/concat
+  vel_proj: true
+
+  # LayerNorm on per-modality concatenated feature [h, v]
+  use_layernorm: true
+
+  # Time selection for supervised_ft and classification (unified)
+  # If use_multi_t is true, use t_list with optional t_weights; otherwise use single t_star
+  use_multi_t: false
+  t_star: 1.0
+  t_list: [0.7, 0.85, 1.0]
+  t_weights: [0.2, 0.3, 0.5]    # null or list; if null, uses uniform weights
+
+# ----------------------
 # Training
 # ----------------------
 training:
@@ -99,7 +123,6 @@ training:
     gumbel:
       tau_start: 0.6
       tau_end: 0.3
-    # 非对称 masking
     asym_mask:
       enabled: true
       low_ratio: 0.1
@@ -111,14 +134,13 @@ training:
     max_epochs: 100
     patience: 15
     lr: 1.0e-3
-    t_star: 1.0
     hidden_dims: [256, 128]
     dropout: 0.4
 
+  # Supervised Finetune
   supervised_ft:
     max_epochs: 20
     patience: 8
-    t_star: 1.0
 
     unfreeze_last_k: 2
     train_vf_inout_proj: true
@@ -134,9 +156,6 @@ training:
 
     weight_decay: 1.0e-4
     log_grads: true
-    t_combo:
-      t_list: [0.6, 0.8, 1.0]
-      t_weights: [0.2, 0.3, 0.5]
 
 
 
@@ -144,12 +163,34 @@ training:
 # Dataset
 # ----------------------
 dataset:
+  # Dataset name: mosei, mosi, urfunny, iemocap, generic
   name: "urfunny"
+  
+  # Task type (for MOSEI only): "SEN" (sentiment) or "EMO" (emotion)
+  task: "SEN"
+  
+  # Number of classes:
+  #   - MOSEI SEN: 2/3/5/7
+  #   - MOSEI EMO: 6 (fixed)
+  #   - MOSI: 2/3/5/7
+  #   - UR-FUNNY: 2 (fixed)
+  #   - IEMOCAP: 4/6
+  num_classes: 2
+  
+  # Number of data loading workers (0 = main process)
+  num_workers: 4
+  
+  # Pin memory for GPU transfer
+  pin_memory: false
+  
+  # Which modalities to normalize (default: ["vis", "aud"])
+  normalize: ["vis", "aud"]
+  
+  # Label key in data (for generic dataset)
+  label_key: "labels"
+  
+  # Modality keys for generic dataset (optional override)
   modality_keys:
-    mosei:
-      vis: "vision"
-      aud: "audio"
-      txt: "text"
     urfunny:
       vis: "vision"
       aud: "audio"
