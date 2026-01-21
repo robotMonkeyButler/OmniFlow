@@ -158,6 +158,28 @@ class PerModalityAlphaGeometry(nn.Module):
             raise ValueError(f"Unknown prior_type: {self.cfg.prior_type}")
         return self.cfg.prior_scale * x0
 
+    def prior_mean_x(
+        self, shape: torch.Size, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """
+        Deterministic 'mean' prior in x-space.
+        For lognormal: if log_x ~ N(0, sigma^2) with sigma=0.5 -> E[x]=exp(0.5*sigma^2)=exp(0.125).
+        For softplus: use softplus(0)=log(2) as a stable deterministic center.
+        """
+        if self.cfg.prior_type == "lognormal":
+            mean = math.exp(0.125)  # exp(0.5 * 0.5^2)
+            x0 = torch.full(shape, float(mean), device=device, dtype=dtype).clamp_min(
+                self.cfg.eps
+            )
+        elif self.cfg.prior_type == "softplus":
+            mean = math.log(2.0)
+            x0 = torch.full(shape, float(mean), device=device, dtype=dtype).clamp_min(
+                self.cfg.eps
+            )
+        else:
+            raise ValueError(f"Unknown prior_type: {self.cfg.prior_type}")
+        return self.cfg.prior_scale * x0
+
     def interpolate_x(
         self, x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor
     ) -> torch.Tensor:
@@ -459,6 +481,47 @@ class MultiStreamTransformer(nn.Module):
 
 
 # ============================================================
+# Attention Pooling
+# ============================================================
+
+
+class AttentionPooling(nn.Module):
+    """
+    Additive attention pooling over time dimension.
+    Inputs:
+      h: (B, T, D)
+      pad_mask: (B, T) bool, True=PAD
+    Output:
+      r: (B, D)
+    """
+
+    def __init__(self, d_model: int, hidden: int = 128, dropout: float = 0.0):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.Tanh(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(
+        self, h: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        scores = self.proj(h).squeeze(-1)  # (B,T)
+        if pad_mask is not None:
+            scores = scores.masked_fill(pad_mask, float("-inf"))
+        attn = torch.softmax(scores, dim=1)
+
+        # guard NaN if all masked
+        if torch.isnan(attn).any():
+            attn = torch.where(torch.isfinite(attn), attn, torch.zeros_like(attn))
+            denom = attn.sum(dim=1, keepdim=True).clamp_min(1e-8)
+            attn = attn / denom
+
+        return torch.sum(h * attn.unsqueeze(-1), dim=1)
+
+
+# ============================================================
 # OmniFlow Model
 # ============================================================
 
@@ -552,6 +615,40 @@ class OmniFlow(nn.Module):
             self.cfg.share_layers,
         )
 
+        # Hidden readout pooling
+        self.attn_pool_h = nn.ModuleDict(
+            {
+                "vis": AttentionPooling(self.cfg.d_model, hidden=128, dropout=0.0),
+                "aud": AttentionPooling(self.cfg.d_model, hidden=128, dropout=0.0),
+                "txt": AttentionPooling(self.cfg.d_model, hidden=128, dropout=0.0),
+            }
+        )
+
+        # Velocity branch: project u_hat (measure_dim) -> d_model and pool
+        self.vel_proj = nn.ModuleDict(
+            {
+                "vis": nn.Linear(self.cfg.measure_dim, self.cfg.d_model),
+                "aud": nn.Linear(self.cfg.measure_dim, self.cfg.d_model),
+                "txt": nn.Linear(self.cfg.measure_dim, self.cfg.d_model),
+            }
+        )
+        self.attn_pool_v = nn.ModuleDict(
+            {
+                "vis": AttentionPooling(self.cfg.d_model, hidden=128, dropout=0.0),
+                "aud": AttentionPooling(self.cfg.d_model, hidden=128, dropout=0.0),
+                "txt": AttentionPooling(self.cfg.d_model, hidden=128, dropout=0.0),
+            }
+        )
+
+        # Optional per-modality LN after concat([h, v])
+        self.rep_ln = nn.ModuleDict(
+            {
+                "vis": nn.LayerNorm(self.cfg.d_model * 2),
+                "aud": nn.LayerNorm(self.cfg.d_model * 2),
+                "txt": nn.LayerNorm(self.cfg.d_model * 2),
+            }
+        )
+
     # ----------------------
     # Control methods
     # ----------------------
@@ -569,22 +666,18 @@ class OmniFlow(nn.Module):
     def set_txt_gumbel(self, tau: float, hard: bool = False):
         self.adapters["txt"].set_gumbel(tau, hard)
 
-    # >>> ADDED: freeze adapters (optional for supervised finetune)
     def freeze_adapters(self):
         for p in self.adapters.parameters():
             p.requires_grad = False
 
-    # >>> ADDED: unfreeze adapters (if you want extreme performance)
     def unfreeze_adapters(self):
         for p in self.adapters.parameters():
             p.requires_grad = True
 
-    # >>> ADDED: utility to freeze all parameters
     def freeze_all(self):
         for p in self.parameters():
             p.requires_grad = False
 
-    # >>> ADDED: make only last K vf layers + vf in/out proj trainable (for supervised finetune)
     def set_trainable_supervised_ft(
         self, last_k: int = 2, train_vf_inout_proj: bool = True
     ):
@@ -728,7 +821,14 @@ class OmniFlow(nn.Module):
             **{f"alpha_{k}": alphas[k].detach() for k in self.modality_names},
         }
 
-    # >>> ADDED: gradient-enabled representation encoding (for supervised finetune)
+    def representation_dim(self, rep_mode: str) -> int:
+        """Return the dimension of the representation for a given mode."""
+        if rep_mode in ("hidden_mean", "hidden_attn"):
+            return self.cfg.d_model * 3
+        if rep_mode in ("hidden_attn_vel_x1", "hidden_attn_vel_detprior"):
+            return self.cfg.d_model * 6
+        raise ValueError(f"Unknown rep_mode: {rep_mode}")
+
     def encode_representation(
         self,
         vis: torch.Tensor,
@@ -738,10 +838,18 @@ class OmniFlow(nn.Module):
         aud_pad: Optional[torch.Tensor] = None,
         txt_pad: Optional[torch.Tensor] = None,
         t_star: float = 1.0,
+        rep_mode: str = "hidden_attn",
+        vel_proj: bool = True,
+        use_layernorm: bool = True,
     ) -> torch.Tensor:
         """
-        Same as extract_representation, but WITH gradients (no @torch.no_grad()).
-        Used for supervised finetune where we update vf_net last layers + in/out proj.
+        Representation extraction with gradients (for supervised finetune).
+
+        rep_mode:
+          - hidden_mean            : mean-pooled hidden states only (d_model * 3)
+          - hidden_attn            : attention-pooled hidden states only (d_model * 3)
+          - hidden_attn_vel_x1     : hidden + velocity at x_in = x1 (d_model * 6)
+          - hidden_attn_vel_detprior : hidden + velocity at x_t with deterministic x0 mean (d_model * 6)
         """
         B, device = vis.size(0), vis.device
         pad_mask = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
@@ -750,22 +858,67 @@ class OmniFlow(nn.Module):
         y = self._project(vis, aud, txt)
         t = torch.full((B,), float(t_star), device=device)
 
-        x_in = {}
+        # Build x1 for all modalities (deterministic if txt use_gumbel is off)
+        x1 = {}
         for k in self.modality_names:
             if k == "txt":
                 m1 = self.adapters[k](y[k], pad_mask.get(k), return_probs=False)
             else:
                 m1 = self.adapters[k](y[k], pad_mask.get(k))
-            x_in[k] = self.alpha_geo.m_to_x(m1, k)
+            x1[k] = self.alpha_geo.m_to_x(m1, k)
 
-        _, hidden = self.vf_net(x_in, t, pad_mask)
+        # Choose input to vf based on rep_mode
+        if rep_mode in ("hidden_mean", "hidden_attn"):
+            x_in = x1
+        elif rep_mode == "hidden_attn_vel_x1":
+            x_in = x1
+        elif rep_mode == "hidden_attn_vel_detprior":
+            x0 = {
+                k: self.alpha_geo.prior_mean_x(x1[k].shape, device, x1[k].dtype)
+                for k in self.modality_names
+            }
+            x_in = {
+                k: self.alpha_geo.interpolate_x(x0[k], x1[k], t)
+                for k in self.modality_names
+            }
+        else:
+            raise ValueError(f"Unknown rep_mode: {rep_mode}")
 
-        r_parts = []
+        u_hat, hidden = self.vf_net(x_in, t, pad_mask)
+
+        # Pool representations
+        parts = []
+
+        if rep_mode == "hidden_mean":
+            # Mean pooling over time dimension
+            for k in self.modality_names:
+                keep = (~pad_mask[k]) if k in pad_mask else None
+                h_pool = masked_mean(hidden[k], keep, dim=1)
+                parts.append(h_pool)
+            return torch.cat(parts, dim=-1)
+
+        if rep_mode == "hidden_attn":
+            # Attention pooling over time dimension
+            for k in self.modality_names:
+                h_pool = self.attn_pool_h[k](hidden[k], pad_mask.get(k))
+                parts.append(h_pool)
+            return torch.cat(parts, dim=-1)
+
+        # velocity-enhanced modes
         for k in self.modality_names:
-            keep = (~pad_mask[k]) if k in pad_mask else None
-            r_parts.append(masked_mean(hidden[k], keep, dim=1))
+            h_pool = self.attn_pool_h[k](hidden[k], pad_mask.get(k))
 
-        return torch.cat(r_parts, dim=-1)
+            v = u_hat[k]
+            if vel_proj:
+                v = self.vel_proj[k](v)  # (B,T,d_model)
+
+            v_pool = self.attn_pool_v[k](v, pad_mask.get(k))  # (B,d_model)
+            hv = torch.cat([h_pool, v_pool], dim=-1)  # (B,2*d_model)
+            if use_layernorm:
+                hv = self.rep_ln[k](hv)
+            parts.append(hv)
+
+        return torch.cat(parts, dim=-1)
 
     @torch.no_grad()
     def extract_representation(
@@ -777,8 +930,20 @@ class OmniFlow(nn.Module):
         aud_pad: Optional[torch.Tensor] = None,
         txt_pad: Optional[torch.Tensor] = None,
         t_star: float = 1.0,
+        rep_mode: str = "hidden_attn",
+        vel_proj: bool = True,
+        use_layernorm: bool = True,
     ) -> torch.Tensor:
-        # >>> MODIFIED: reuse encode_representation (but under no_grad)
+        """Same as encode_representation but without gradients."""
         return self.encode_representation(
-            vis, aud, txt, vis_pad, aud_pad, txt_pad, t_star
+            vis,
+            aud,
+            txt,
+            vis_pad,
+            aud_pad,
+            txt_pad,
+            t_star=t_star,
+            rep_mode=rep_mode,
+            vel_proj=vel_proj,
+            use_layernorm=use_layernorm,
         )
