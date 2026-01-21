@@ -61,6 +61,7 @@ class MOSEIDataset(BaseTriModalDataset):
         num_classes: int = 2,
         normalize: List[str] = None,
         normalize_stats: Dict[str, Tuple[np.ndarray, np.ndarray]] = None,
+        clip_margin: float = 0.1,
     ):
         """
         Args:
@@ -70,12 +71,14 @@ class MOSEIDataset(BaseTriModalDataset):
             num_classes: Number of classes (2/3/5/7 for SEN, 6 for EMO)
             normalize: List of modality keys to normalize
             normalize_stats: Pre-computed normalization statistics
+            clip_margin: Margin to add to abs_max when clipping (e.g., 0.1 for 10%)
         """
         if task not in ["SEN", "EMO"]:
             raise ValueError(f"task must be 'SEN' or 'EMO', got {task}")
 
         self.task = task
         self.num_classes = 6 if task == "EMO" else num_classes
+        self.clip_margin = clip_margin
 
         # Set label names
         if task == "EMO":
@@ -107,6 +110,10 @@ class MOSEIDataset(BaseTriModalDataset):
             self.data = test
 
         self.n_samples = len(self.data[self.MODALITY_KEYS["txt"]])
+
+        # Compute and apply clipping to handle inf values
+        clip_stats = self.compute_clip_stats(margin=self.clip_margin)
+        self.apply_clipping(clip_stats)
 
     def _process_label(self, raw_label: Any) -> torch.Tensor:
         """Convert raw label to discrete class."""

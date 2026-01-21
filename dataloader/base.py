@@ -130,6 +130,65 @@ class BaseTriModalDataset(Dataset, ABC):
                 self.data[actual_key][i] = (self.data[actual_key][i] - mean) / std
         self.normalize_stats = stats
 
+    def compute_clip_stats(
+        self, margin: float = 0.0
+    ) -> Dict[str, float]:
+        """
+        Compute clipping statistics (abs_max) for each modality.
+        Handles inf/nan values by considering only finite values.
+
+        Args:
+            margin: Extra margin to add to abs_max (e.g., 0.1 for 10% buffer)
+
+        Returns:
+            Dictionary mapping modality keys to clip values
+            {
+                "vis": abs_max_vis,
+                "aud": abs_max_aud,
+                "txt": abs_max_txt,
+            }
+        """
+        stats = {}
+        for key in self.MODALITY_KEYS.keys():
+            actual_key = self.MODALITY_KEYS[key]
+            all_data = np.concatenate(self.data[actual_key], axis=0)
+
+            # Keep only finite values (remove inf and nan)
+            finite_mask = np.isfinite(all_data)
+            finite_data = all_data[finite_mask]
+
+            if len(finite_data) == 0:
+                # If all values are inf/nan, use default
+                abs_max = 1.0
+            else:
+                abs_max = np.max(np.abs(finite_data))
+
+            # Add margin if specified
+            if margin > 0:
+                abs_max = abs_max * (1.0 + margin)
+
+            stats[key] = abs_max
+
+        return stats
+
+    def apply_clipping(self, stats: Dict[str, float]) -> None:
+        """
+        Apply value clipping to all modalities using pre-computed statistics.
+        Replaces NaN values with 0.
+
+        Args:
+            stats: Dictionary mapping modality keys to clip values
+                   (output from compute_clip_stats)
+        """
+        for key, abs_max in stats.items():
+            actual_key = self.MODALITY_KEYS[key]
+            for i in range(len(self.data[actual_key])):
+                data = self.data[actual_key][i]
+                # Replace NaN with 0
+                data = np.nan_to_num(data, nan=0.0)
+                # Clip to [-abs_max, abs_max]
+                self.data[actual_key][i] = np.clip(data, -abs_max, abs_max)
+
 
 # ============================================================
 # Collate Function (shared by all datasets)
