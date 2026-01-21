@@ -15,6 +15,7 @@ from .base import BaseTriModalDataset, collate_fn, load_raw_data, split_data
 from .mosei import MOSEIDataset, MOSIDataset
 from .urfunny import URFunnyDataset
 from .iemocap import IEMOCAPDataset
+from .mustard import MUStARDDataset
 
 
 # ============================================================
@@ -26,6 +27,7 @@ DATASET_REGISTRY: Dict[str, Type[BaseTriModalDataset]] = {
     "mosi": MOSIDataset,
     "urfunny": URFunnyDataset,
     "iemocap": IEMOCAPDataset,
+    "mustard": MUStARDDataset,
 }
 
 
@@ -82,12 +84,19 @@ def get_dataloaders(
         ds_kwargs["num_classes"] = ds_cfg.get("num_classes", 2)
     elif dataset_name in ["iemocap"]:
         ds_kwargs["num_classes"] = ds_cfg.get("num_classes", 4)
+    elif dataset_name in ["mustard"]:
+        ds_kwargs["task"] = ds_cfg.get("task", "SAR")
     elif dataset_name == "generic":
         # Get modality keys from config
         modality_keys_cfg = ds_cfg.get("modality_keys", {})
         if dataset_name in modality_keys_cfg:
             ds_kwargs["modality_keys"] = modality_keys_cfg[dataset_name]
         ds_kwargs["label_key"] = ds_cfg.get("label_key", "labels")
+
+    # Get dataset class from registry
+    if dataset_name not in DATASET_REGISTRY:
+        raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_REGISTRY.keys())}")
+    dataset_class = DATASET_REGISTRY[dataset_name]
 
     # Create train dataset first to compute normalization stats
     train_ds = dataset_class(split="train", **ds_kwargs)
