@@ -15,7 +15,6 @@ from .base import BaseTriModalDataset, collate_fn, load_raw_data, split_data
 from .mosei import MOSEIDataset, MOSIDataset
 from .urfunny import URFunnyDataset
 from .iemocap import IEMOCAPDataset
-from .generic import GenericDataset
 
 
 # ============================================================
@@ -27,7 +26,6 @@ DATASET_REGISTRY: Dict[str, Type[BaseTriModalDataset]] = {
     "mosi": MOSIDataset,
     "urfunny": URFunnyDataset,
     "iemocap": IEMOCAPDataset,
-    "generic": GenericDataset,
 }
 
 
@@ -69,13 +67,6 @@ def get_dataloaders(
     num_workers = ds_cfg.get("num_workers", 0)
     pin_memory = ds_cfg.get("pin_memory", False)
     normalize = ds_cfg.get("normalize", ["vis", "aud"])
-
-    # Get dataset class
-    if dataset_name not in DATASET_REGISTRY:
-        print(f"Warning: Unknown dataset '{dataset_name}', using GenericDataset")
-        dataset_class = GenericDataset
-    else:
-        dataset_class = DATASET_REGISTRY[dataset_name]
 
     # Build dataset kwargs based on dataset type
     ds_kwargs = {
