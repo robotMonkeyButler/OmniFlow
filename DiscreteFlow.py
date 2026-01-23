@@ -72,10 +72,10 @@ class VectorQuantizer(nn.Module):
 class DiscreteFlow(nn.Module):
     MODALITIES = ["vis", "aud", "txt"]
 
-    def __init__(self, dims: Dict[str, int], cfg: Optional[FlowConfig] = None, quantizer_k: Optional[int] = None, quantizer_mode: str = 'kmeans'):
+    def __init__(self, dims: Dict[str, int], cfg: Optional[FlowConfig] = None, quantizer_k: Optional[int] = None, quantizer_mode: str = 'kmeans', modality_names: Optional[List[str]] = None):
         super().__init__()
         self.cfg = cfg or FlowConfig()
-        self.modality_names = ["vis", "aud", "txt"] # Explicit order
+        self.modality_names = modality_names or ["vis", "aud", "txt"]
 
         # Use measure_dim as the default codebook/vocab size; allow optional override via quantizer_k
         self.vocab_size = quantizer_k if quantizer_k is not None else self.cfg.measure_dim
@@ -87,7 +87,6 @@ class DiscreteFlow(nn.Module):
             for k in self.modality_names
         })
 
-        
         self.vf_net = MultiStreamTransformer(
             self.modality_names,
             measure_dim=self.vocab_size, # 输入/输出直接是 Logits/Probs
@@ -151,18 +150,18 @@ class DiscreteFlow(nn.Module):
         print("Initializing codebooks...")
         
         # Gather some data
-        data_store = {k: [] for k in self.modality_names} 
+        data_store = {k: [] for k in self.modality_names}
         max_samples = 4096 * 4
         
         total = 0
         for batch in dataloader:
-            if total >= max_samples: break
+            if total >= max_samples:
+                break
             vis, aud, txt, _, _, _, _ = batch
-            
-            data_store["vis"].append(vis)
-            data_store["aud"].append(aud)
-            data_store["txt"].append(txt)
-            total += vis.size(0) * vis.size(1) # num tokens
+            data_map = {"vis": vis, "aud": aud, "txt": txt}
+            for k in self.modality_names:
+                data_store[k].append(data_map[k])
+            total += vis.size(0) * vis.size(1)  # num tokens
         
         for k in self.modality_names:
             if len(data_store[k]) > 0:
@@ -172,12 +171,15 @@ class DiscreteFlow(nn.Module):
         print("Codebooks initialized.")
 
     def _get_indices(self, vis, aud, txt):
+        inputs = {"vis": vis, "aud": aud, "txt": txt}
+        out = {}
         with torch.no_grad():
-            idx_vis = self.quantizers["vis"](vis)
-            idx_aud = self.quantizers["aud"](aud)
-            idx_txt = self.quantizers["txt"](txt)
-        
-        return {"vis": idx_vis, "aud": idx_aud, "txt": idx_txt}
+            for k in self.modality_names:
+                xk = inputs.get(k)
+                if xk is None:
+                    continue
+                out[k] = self.quantizers[k](xk)
+        return out
 
     def _token_weights(self, span_mask, pad_mask):
         w = torch.where(span_mask, self.cfg.w_masked, self.cfg.w_visible).float()
@@ -186,28 +188,35 @@ class DiscreteFlow(nn.Module):
         return w
 
     def compute_loss(self, vis, aud, txt, vis_pad=None, aud_pad=None, txt_pad=None):
-        B, device = vis.size(0), vis.device
-        pad_mask = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
+        inputs = {"vis": vis, "aud": aud, "txt": txt}
+        pads = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
+
+        first = next((v for v in inputs.values() if v is not None), None)
+        if first is None:
+            raise ValueError("No modality provided to DiscreteFlow.compute_loss")
+        B, device = first.size(0), first.device
+        pad_mask = {k: pads.get(k) for k in self.modality_names}
         
         indices = self._get_indices(vis, aud, txt)
+        if len(indices) == 0:
+            raise ValueError("No active modalities for loss computation")
         
         t = torch.rand(B, device=device)
         t = (t ** self.cfg.t_gamma) * self.cfg.t_max
         t_view = t.view(-1, 1, 1)
 
         x_tilde, u_target, weights = {}, {}, {}
+        active = 0
         
         for k in self.modality_names:
+            if k not in indices:
+                continue
             idx = indices[k]
             pk = pad_mask.get(k)
             
             # Fixed One-Hot Target (x1)
-            # x1 shape: (B, T, 1024)
             x1 = F.one_hot(idx, num_classes=self.vocab_size).float()
-            
-
             x0 = torch.full_like(x1, 1.0 / self.vocab_size)
-            
 
             xt = (1.0 - t_view) * x0 + t_view * x1
             ut = x1 - x0
@@ -223,18 +232,20 @@ class DiscreteFlow(nn.Module):
             x_tilde[k] = xtilde_k
             u_target[k] = ut
             weights[k] = self._token_weights(s, pk)
+            active += 1
+
+        if active == 0:
+            raise ValueError("No active modalities for loss computation")
 
         # Forward
-        # vf_net 内部需要处理 (B, T, vocab_size) -> d_model 的输入投影 
-        # (MultiStreamTransformer 已用 measure_dim 初始化了输入层)
         u_hat, _ = self.vf_net(x_tilde, t, pad_mask)
         
         losses = {}
         total = 0.0
         for k in self.modality_names:
-            # Loss: MSE on Probability/Logits space
+            if k not in u_hat:
+                continue
             diff = u_hat[k] - u_target[k]
-            # Scale by dim to keep magnitude similar to other losses
             err = (diff.pow(2)).mean(dim=-1) * self.vocab_size 
             
             w = weights[k]
@@ -244,9 +255,9 @@ class DiscreteFlow(nn.Module):
             
         return {
             "total": total,
-            "loss_vis": losses["loss_vis"],
-            "loss_aud": losses["loss_aud"],
-            "loss_txt": losses["loss_txt"],
+            "loss_vis": losses.get("loss_vis", torch.tensor(0.0, device=device)),
+            "loss_aud": losses.get("loss_aud", torch.tensor(0.0, device=device)),
+            "loss_txt": losses.get("loss_txt", torch.tensor(0.0, device=device)),
             "loss_txt_usage": torch.tensor(0.0, device=device),
             "alpha_vis": torch.tensor(1.0, device=device),
             "alpha_aud": torch.tensor(1.0, device=device),
@@ -267,47 +278,65 @@ class DiscreteFlow(nn.Module):
         use_layernorm: bool = True,
     ) -> torch.Tensor:
 
-        B, device = vis.size(0), vis.device
-        pad_mask = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
-        pad_mask = {k: v for k, v in pad_mask.items() if v is not None}
+        inputs = {"vis": vis, "aud": aud, "txt": txt}
+        pads = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
+
+        first = next((v for v in inputs.values() if v is not None), None)
+        if first is None:
+            raise ValueError("No modality provided to DiscreteFlow.encode_representation")
+        B, device = first.size(0), first.device
+        pad_mask = {k: pads.get(k) for k in self.modality_names}
 
         indices = self._get_indices(vis, aud, txt)
+        if len(indices) == 0:
+            raise ValueError("No active modalities for representation encoding")
         t = torch.full((B,), float(t_star), device=device)
 
-        x_in = {}
-        
         # quantization to one-hot
         x1_all = {}
         for k in self.modality_names:
-             x1_all[k] = F.one_hot(indices[k], num_classes=self.vocab_size).float()
+            if k not in indices:
+                continue
+            x1_all[k] = F.one_hot(indices[k], num_classes=self.vocab_size).float()
 
         if rep_mode in ("hidden_mean", "hidden_attn", "hidden_attn_vel_x1"):
             x_in = x1_all
         elif rep_mode == "hidden_attn_vel_detprior":
-             # x0 mean is uniform
-             for k in self.modality_names:
-                 x0 = torch.full_like(x1_all[k], 1.0 / self.vocab_size)
-                 x_in[k] = (1.0 - t_star) * x0 + t_star * x1_all[k]
+            x_in = {}
+            for k in x1_all:
+                x0 = torch.full_like(x1_all[k], 1.0 / self.vocab_size)
+                x_in[k] = (1.0 - t_star) * x0 + t_star * x1_all[k]
         else:
-             raise ValueError(f"Unknown mode {rep_mode}")
+            raise ValueError(f"Unknown mode {rep_mode}")
 
         u_hat, hidden = self.vf_net(x_in, t, pad_mask)
         
         parts = []
         if rep_mode == "hidden_mean":
-             for k in self.modality_names:
-                 keep = (~pad_mask[k]) if k in pad_mask else None
-                 h = masked_mean(hidden[k], keep, dim=1)
-                 parts.append(h)
-             return torch.cat(parts, dim=-1)
+            for k in self.modality_names:
+                if k not in hidden:
+                    continue
+                mask_k = pad_mask.get(k)
+                keep = (~mask_k) if mask_k is not None else None
+                h = masked_mean(hidden[k], keep, dim=1)
+                parts.append(h)
+            if len(parts) == 0:
+                raise ValueError("No hidden states available for pooling")
+            return torch.cat(parts, dim=-1)
         
         if rep_mode == "hidden_attn":
-             for k in self.modality_names:
-                 h = self.attn_pool_h[k](hidden[k], pad_mask.get(k))
-                 parts.append(h)
-             return torch.cat(parts, dim=-1)
+            for k in self.modality_names:
+                if k not in hidden:
+                    continue
+                h = self.attn_pool_h[k](hidden[k], pad_mask.get(k))
+                parts.append(h)
+            if len(parts) == 0:
+                raise ValueError("No hidden states available for attention pooling")
+            return torch.cat(parts, dim=-1)
 
         for k in self.modality_names:
+            if k not in hidden or k not in u_hat:
+                continue
             h_pool = self.attn_pool_h[k](hidden[k], pad_mask.get(k))
             v = u_hat[k]
             if vel_proj:
@@ -318,6 +347,8 @@ class DiscreteFlow(nn.Module):
                 hv = self.rep_ln[k](hv)
             parts.append(hv)
             
+        if len(parts) == 0:
+            raise ValueError("No representations available to concatenate")
         return torch.cat(parts, dim=-1)
 
     @torch.no_grad()

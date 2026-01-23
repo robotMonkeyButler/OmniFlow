@@ -666,7 +666,7 @@ def run_supervised_finetune(
             params_vf.append(p)
         elif n.startswith("projs."):
             params_projs.append(p)
-        elif n.startswith("adapters."):
+        elif n.startswith("adapters.") or n.startswith("projectors."):
             params_adapters.append(p)
         elif n.startswith(("attn_pool_h.", "attn_pool_v.", "vel_proj.", "rep_ln.")):
             params_rep.append(p)
@@ -1100,13 +1100,23 @@ def main():
 
     if model_type == "continuous":
         print(">>> Initializing ContinuousFlow Baseline")
-        model = ContinuousFlow(dims, flow_cfg).to(device)
+        mods = cfg.get("model", {}).get("modalities", None)
+        if mods is not None and isinstance(mods, list) and len(mods) > 0:
+            print(f"Using modalities: {mods}")
+            model = ContinuousFlow(dims, flow_cfg, modality_names=mods).to(device)
+        else:
+            model = ContinuousFlow(dims, flow_cfg).to(device)
     elif model_type == "discrete":
         print(">>> Initializing DiscreteFlow Baseline")
+        mods = cfg.get("model", {}).get("modalities", None)
         q_cfg = cfg.get("quantization", {})
         k = q_cfg.get("codebook_size", 1024)
         mode = q_cfg.get("mode", "kmeans")
-        model = DiscreteFlow(dims, flow_cfg, quantizer_k=k, quantizer_mode=mode).to(device)
+        if mods is not None and isinstance(mods, list) and len(mods) > 0:
+            print(f"Using modalities: {mods}")
+            model = DiscreteFlow(dims, flow_cfg, quantizer_k=k, quantizer_mode=mode, modality_names=mods).to(device)
+        else:
+            model = DiscreteFlow(dims, flow_cfg, quantizer_k=k, quantizer_mode=mode).to(device)
         model.init_codebooks(train_loader, device)
     else:
         print(">>> Initializing OmniFlow (Default)")
