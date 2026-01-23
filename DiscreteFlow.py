@@ -37,11 +37,11 @@ class VectorQuantizer(nn.Module):
                 km.fit(data.cpu().numpy())
                 self.codebook.data.copy_(torch.from_numpy(km.cluster_centers_))
             except ImportError:
-                 print("sklearn not found. Using random init.")
-                 self._random_init(data)
+                print("sklearn not found. Using random init.")
+                self._random_init(data)
         else:
-             print("Initializing VQ with Uniform (Random) Codebook...")
-             self._random_init(data)
+            print("Initializing VQ with Uniform (Random) Codebook...")
+            self._random_init(data)
         
         self.initialized = True
 
