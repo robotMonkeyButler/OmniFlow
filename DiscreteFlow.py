@@ -72,17 +72,18 @@ class VectorQuantizer(nn.Module):
 class DiscreteFlow(nn.Module):
     MODALITIES = ["vis", "aud", "txt"]
 
-    def __init__(self, dims: Dict[str, int], cfg: Optional[FlowConfig] = None, quantizer_k: int = 1024, quantizer_mode: str = 'kmeans'):
+    def __init__(self, dims: Dict[str, int], cfg: Optional[FlowConfig] = None, quantizer_k: Optional[int] = None, quantizer_mode: str = 'kmeans'):
         super().__init__()
         self.cfg = cfg or FlowConfig()
         self.modality_names = ["vis", "aud", "txt"] # Explicit order
-        
-        self.vocab_size = quantizer_k
-        self.cfg.measure_dim = self.vocab_size 
+
+        # Use measure_dim as the default codebook/vocab size; allow optional override via quantizer_k
+        self.vocab_size = quantizer_k if quantizer_k is not None else self.cfg.measure_dim
+        self.cfg.measure_dim = self.vocab_size
 
         # Quantizers (Only for continuous inputs)
         self.quantizers = nn.ModuleDict({
-            k: VectorQuantizer(dims[k], k=quantizer_k, mode=quantizer_mode)
+            k: VectorQuantizer(dims[k], k=self.vocab_size, mode=quantizer_mode)
             for k in self.modality_names
         })
 
@@ -200,7 +201,7 @@ class DiscreteFlow(nn.Module):
             idx = indices[k]
             pk = pad_mask.get(k)
             
-            #  Fixed One-Hot Target (x1)
+            # Fixed One-Hot Target (x1)
             # x1 shape: (B, T, 1024)
             x1 = F.one_hot(idx, num_classes=self.vocab_size).float()
             
@@ -252,17 +253,30 @@ class DiscreteFlow(nn.Module):
             "alpha_txt": torch.tensor(1.0, device=device),
         }
 
-    def encode_representation(self, vis, aud, txt, vis_pad=None, aud_pad=None, txt_pad=None, t_star=1.0, rep_mode="hidden_attn", vel_proj=True, use_layernorm=True):
+    def encode_representation(
+        self,
+        vis: torch.Tensor,
+        aud: torch.Tensor,
+        txt: torch.Tensor,
+        vis_pad: Optional[torch.Tensor] = None,
+        aud_pad: Optional[torch.Tensor] = None,
+        txt_pad: Optional[torch.Tensor] = None,
+        t_star: float = 1.0,
+        rep_mode: str = "hidden_attn",
+        vel_proj: bool = True,
+        use_layernorm: bool = True,
+    ) -> torch.Tensor:
+
         B, device = vis.size(0), vis.device
         pad_mask = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
-        
+        pad_mask = {k: v for k, v in pad_mask.items() if v is not None}
+
         indices = self._get_indices(vis, aud, txt)
         t = torch.full((B,), float(t_star), device=device)
 
-        # 构建输入 x_in
         x_in = {}
         
-        # 预先计算所有 x1 (One-Hot)
+        # quantization to one-hot
         x1_all = {}
         for k in self.modality_names:
              x1_all[k] = F.one_hot(indices[k], num_classes=self.vocab_size).float()
@@ -306,3 +320,30 @@ class DiscreteFlow(nn.Module):
             
         return torch.cat(parts, dim=-1)
 
+    @torch.no_grad()
+    def extract_representation(
+        self,
+        vis: torch.Tensor,
+        aud: torch.Tensor,
+        txt: torch.Tensor,
+        vis_pad: Optional[torch.Tensor] = None,
+        aud_pad: Optional[torch.Tensor] = None,
+        txt_pad: Optional[torch.Tensor] = None,
+        t_star: float = 1.0,
+        rep_mode: str = "hidden_attn",
+        vel_proj: bool = True,
+        use_layernorm: bool = True,
+    ) -> torch.Tensor:
+        return self.encode_representation(
+            vis,
+            aud,
+            txt,
+            vis_pad,
+            aud_pad,
+            txt_pad,
+            t_star=t_star,
+            rep_mode=rep_mode,
+            vel_proj=vel_proj,
+            use_layernorm=use_layernorm,
+        )
+       

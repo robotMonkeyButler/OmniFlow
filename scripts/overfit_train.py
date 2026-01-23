@@ -32,6 +32,8 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 
 from OmniFlow import OmniFlow, FlowConfig, GeometryConfig
+from ContinuousFlow import ContinuousFlow
+from DiscreteFlow import DiscreteFlow
 
 
 # ============================================================
@@ -334,15 +336,32 @@ def run_overfit_test(args):
     flow_cfg.w_visible = 0.0  # 只关注 masked 部分
     flow_cfg.txt_usage_weight = 0.0  # 关闭 txt usage reg
 
-    model = OmniFlow(dims, flow_cfg, cfg["geometry"]["alpha_init"]).to(device)
-    model.set_cross_attention(args.cross_attention)
+    model_type = cfg.get("model", {}).get("type", "omni")
+    q_cfg = cfg.get("quantization", {})
+    codebook_k = q_cfg.get("codebook_size", None)
+    quant_mode = q_cfg.get("mode", "kmeans")
 
-    if args.freeze_alpha:
-        model.freeze_alpha()
-        print("🔒 Alpha frozen")
+    if model_type == "continuous":
+        print("Initializing ContinuousFlow for overfit test")
+        model = ContinuousFlow(dims, flow_cfg).to(device)
+    elif model_type == "discrete":
+        print("Initializing DiscreteFlow for overfit test")
+        model = DiscreteFlow(dims, flow_cfg, quantizer_k=codebook_k, quantizer_mode=quant_mode).to(device)
+        model.init_codebooks(train_loader, device)
     else:
-        model.unfreeze_alpha()
-        print("🔓 Alpha trainable")
+        print("Initializing OmniFlow for overfit test")
+        model = OmniFlow(dims, flow_cfg, cfg["geometry"]["alpha_init"]).to(device)
+
+    if hasattr(model, "set_cross_attention"):
+        model.set_cross_attention(args.cross_attention)
+
+    if hasattr(model, "freeze_alpha"):
+        if args.freeze_alpha:
+            model.freeze_alpha()
+            print("🔒 Alpha frozen")
+        else:
+            model.unfreeze_alpha()
+            print("🔓 Alpha trainable")
 
     # Count params
     total_params = sum(p.numel() for p in model.parameters())
@@ -392,7 +411,7 @@ def run_overfit_test(args):
             best_loss = va["total"]
 
         # Get alphas
-        alphas = model.alpha_geo.get_all_alphas()
+        alphas = model.alpha_geo.get_all_alphas() if hasattr(model, "alpha_geo") else {}
         alpha_str = " | ".join([f"{k}={v.item():.3f}" for k, v in alphas.items()])
 
         print(

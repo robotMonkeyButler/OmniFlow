@@ -14,6 +14,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from OmniFlow import OmniFlow, FlowConfig, GeometryConfig
+from ContinuousFlow import ContinuousFlow
+from DiscreteFlow import DiscreteFlow
 from dataloader import get_dataloaders
 
 
@@ -586,7 +588,10 @@ def run_supervised_finetune(
     print(f"[SFT] Representation mode: {rep_mode}")
 
     # deterministic text during supervised finetune
-    model.adapters["txt"].set_gumbel(tau=1.0, hard=False, use_gumbel=False)
+    if hasattr(model, "adapters") and "txt" in model.adapters:
+         model.adapters["txt"].set_gumbel(tau=1.0, hard=False, use_gumbel=False)
+    elif hasattr(model, "set_txt_gumbel"):
+         model.set_txt_gumbel(tau=1.0, hard=False)
     model.set_cross_attention(True)
 
     # freeze/unfreeze plan
@@ -603,7 +608,7 @@ def run_supervised_finetune(
                 p.requires_grad = True
     print("Representation modules: trainable (pool/vel_proj/LN)")
 
-    if unfreeze_projs:
+    if unfreeze_projs and hasattr(model, "projs"):
         for p in model.projs.parameters():
             p.requires_grad = True
 
@@ -615,7 +620,7 @@ def run_supervised_finetune(
         if hasattr(model, "unfreeze_adapters"):
             model.unfreeze_adapters()
 
-        if unfreeze_adapters_partial:
+        if unfreeze_adapters_partial and hasattr(model, "adapters"):
             for k in ["vis", "aud", "txt"]:
                 for p in model.adapters[k].ln.parameters():
                     p.requires_grad = True
@@ -624,7 +629,7 @@ def run_supervised_finetune(
                 for p in model.adapters[k].net[-1].parameters():
                     p.requires_grad = True
             print("Adapters: trainable (partial: ln + net[0] + net[-1])")
-        else:
+        elif hasattr(model, "adapters"):
             for p in model.adapters.parameters():
                 p.requires_grad = True
             print("Adapters: trainable (full)")
@@ -791,6 +796,10 @@ def run_stage1(model, train_loader, val_loader, device, cfg, outdir):
     print(">>> Stage 1: GEOMETRY")
     print("=" * 70)
 
+    if not hasattr(model, "alpha_geo"):
+        print("Model does not have geometry parameters (baseline). Skipping Stage 1.")
+        return model
+
     s1 = cfg["training"]["stage1"]
 
     model.set_cross_attention(s1["cross_attention"])
@@ -872,8 +881,11 @@ def run_stage2(model, train_loader, val_loader, device, cfg, outdir, geo_path=No
     model.cfg.txt_usage_weight = s2["txt_usage_weight"]
     model.freeze_alpha()
 
-    alphas = model.alpha_geo.get_all_alphas()
-    print(f"Frozen α: {' | '.join(f'{k}={v.item():.3f}' for k, v in alphas.items())}")
+    if hasattr(model, "alpha_geo"):
+        alphas = model.alpha_geo.get_all_alphas()
+        print(f"Frozen α: {' | '.join(f'{k}={v.item():.3f}' for k, v in alphas.items())}")
+    else:
+        print("Frozen α: N/A (Baseline)")
 
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -902,8 +914,12 @@ def run_stage2(model, train_loader, val_loader, device, cfg, outdir, geo_path=No
         )
         va = validate(model, val_loader, device)
 
-        alphas = model.alpha_geo.get_all_alphas()
-        alpha_vals = {k: v.item() for k, v in alphas.items()}
+        if hasattr(model, "alpha_geo"):
+            alphas = model.alpha_geo.get_all_alphas()
+            alpha_vals = {k: v.item() for k, v in alphas.items()}
+        else:
+            alpha_vals = {"vis": 0.0, "aud": 0.0, "txt": 0.0}
+
         hist_tr.append(tr["total"])
         hist_val.append(va["total"])
         hist_alpha.append(alpha_vals)
@@ -1080,7 +1096,21 @@ def main():
     )
 
     flow_cfg = build_flow_config(cfg)
-    model = OmniFlow(dims, flow_cfg, cfg["geometry"]["alpha_init"]).to(device)
+    model_type = cfg.get("model", {}).get("type", "omni")
+
+    if model_type == "continuous":
+        print(">>> Initializing ContinuousFlow Baseline")
+        model = ContinuousFlow(dims, flow_cfg).to(device)
+    elif model_type == "discrete":
+        print(">>> Initializing DiscreteFlow Baseline")
+        q_cfg = cfg.get("quantization", {})
+        k = q_cfg.get("codebook_size", 1024)
+        mode = q_cfg.get("mode", "kmeans")
+        model = DiscreteFlow(dims, flow_cfg, quantizer_k=k, quantizer_mode=mode).to(device)
+        model.init_codebooks(train_loader, device)
+    else:
+        print(">>> Initializing OmniFlow (Default)")
+        model = OmniFlow(dims, flow_cfg, cfg["geometry"]["alpha_init"]).to(device)
 
     if args.stage == "geometry":
         run_stage1(model, train_loader, val_loader, device, cfg, args.outdir)

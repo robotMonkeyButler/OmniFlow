@@ -19,8 +19,7 @@ model:
 # Quantization (for DiscreteFlow)
 # ----------------------
 quantization:
-  codebook_size: 1024
-  mode: "kmeans"          # "kmeans" or "uniform" (random)
+  mode: "uniform"          # "kmeans" or "uniform" (random) only for discrete flow
 
 # ----------------------
 # Geometry (α-divergence)
