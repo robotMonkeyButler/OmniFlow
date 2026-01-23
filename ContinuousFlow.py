@@ -12,12 +12,15 @@ from OmniFlow import (
     FlowConfig,
 )
 
+
 class Projector(nn.Module):
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.net = nn.Linear(in_dim, out_dim)
 
-    def forward(self, x: torch.Tensor, pad_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, pad_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         out = self.net(x)
         if pad_mask is not None:
             out = out.masked_fill(pad_mask.unsqueeze(-1), 0.0)
@@ -26,10 +29,16 @@ class Projector(nn.Module):
     def set_gumbel(self, tau: float, hard: bool = False, use_gumbel: bool = True):
         pass
 
+
 class ContinuousFlow(nn.Module):
     MODALITIES = ["vis", "aud", "txt"]
 
-    def __init__(self, dims: Dict[str, int], cfg: Optional[FlowConfig] = None, modality_names: Optional[List[str]] = None):
+    def __init__(
+        self,
+        dims: Dict[str, int],
+        cfg: Optional[FlowConfig] = None,
+        modality_names: Optional[List[str]] = None,
+    ):
         super().__init__()
         self.cfg = cfg or FlowConfig()
         self.modality_names = modality_names or self.MODALITIES
@@ -39,9 +48,12 @@ class ContinuousFlow(nn.Module):
             # Use Linear for continuous features, 'txt' also inputs continuous embeddings
             self.projs[k] = nn.Linear(dims[k], self.cfg.d_model)
 
-        self.projectors = nn.ModuleDict({
-            k: Projector(self.cfg.d_model, self.cfg.measure_dim) for k in self.modality_names
-        })
+        self.projectors = nn.ModuleDict(
+            {
+                k: Projector(self.cfg.d_model, self.cfg.measure_dim)
+                for k in self.modality_names
+            }
+        )
 
         self.vf_net = MultiStreamTransformer(
             self.modality_names,
@@ -53,38 +65,51 @@ class ContinuousFlow(nn.Module):
             self.cfg.share_layers,
         )
 
-        self.attn_pool_h = nn.ModuleDict({
-            k: AttentionPooling(self.cfg.d_model, hidden=128) for k in self.modality_names
-        })
-        self.vel_proj = nn.ModuleDict({
-            k: nn.Linear(self.cfg.measure_dim, self.cfg.d_model) for k in self.modality_names
-        })
-        self.attn_pool_v = nn.ModuleDict({
-            k: AttentionPooling(self.cfg.d_model, hidden=128) for k in self.modality_names
-        })
-        self.rep_ln = nn.ModuleDict({
-            k: nn.LayerNorm(self.cfg.d_model * 2) for k in self.modality_names
-        })
+        self.attn_pool_h = nn.ModuleDict(
+            {
+                k: AttentionPooling(self.cfg.d_model, hidden=128)
+                for k in self.modality_names
+            }
+        )
+        self.vel_proj = nn.ModuleDict(
+            {
+                k: nn.Linear(self.cfg.measure_dim, self.cfg.d_model)
+                for k in self.modality_names
+            }
+        )
+        self.attn_pool_v = nn.ModuleDict(
+            {
+                k: AttentionPooling(self.cfg.d_model, hidden=128)
+                for k in self.modality_names
+            }
+        )
+        self.rep_ln = nn.ModuleDict(
+            {k: nn.LayerNorm(self.cfg.d_model * 2) for k in self.modality_names}
+        )
 
     # ----------------------
     # Control methods (Compatibility)
     # ----------------------
-    def freeze_alpha(self): pass
-    def unfreeze_alpha(self): pass
-    
+    def freeze_alpha(self):
+        pass
+
+    def unfreeze_alpha(self):
+        pass
+
     def freeze_adapters(self):
         # Back-compat: treat projectors as former adapters
         for p in self.projectors.parameters():
             p.requires_grad = False
-    
+
     def unfreeze_adapters(self):
         # Back-compat: treat projectors as former adapters
         for p in self.projectors.parameters():
             p.requires_grad = True
-    
+
     def freeze_all(self):
-        for p in self.parameters(): p.requires_grad = False
-        
+        for p in self.parameters():
+            p.requires_grad = False
+
     def set_cross_attention(self, enabled: bool):
         self.vf_net.set_use_cross_attention(enabled)
 
@@ -92,23 +117,29 @@ class ContinuousFlow(nn.Module):
         # IdentityAdapter has set_gumbel (noop)
         pass
 
-    def set_trainable_supervised_ft(self, last_k: int = 2, train_vf_inout_proj: bool = True):
+    def set_trainable_supervised_ft(
+        self, last_k: int = 2, train_vf_inout_proj: bool = True
+    ):
         last_k = max(1, int(last_k))
         if train_vf_inout_proj:
-            for p in self.vf_net.in_proj.parameters(): p.requires_grad = True
-            for p in self.vf_net.out_proj.parameters(): p.requires_grad = True
-        
+            for p in self.vf_net.in_proj.parameters():
+                p.requires_grad = True
+            for p in self.vf_net.out_proj.parameters():
+                p.requires_grad = True
+
         if self.vf_net.share_layers:
             n = len(self.vf_net.layers)
             start = max(0, n - last_k)
             for i in range(start, n):
-                for p in self.vf_net.layers[i].parameters(): p.requires_grad = True
+                for p in self.vf_net.layers[i].parameters():
+                    p.requires_grad = True
         else:
             for m in self.vf_net.modality_names:
                 n = len(self.vf_net.layers[m])
                 start = max(0, n - last_k)
                 for i in range(start, n):
-                    for p in self.vf_net.layers[m][i].parameters(): p.requires_grad = True
+                    for p in self.vf_net.layers[m][i].parameters():
+                        p.requires_grad = True
 
     def _project(self, vis, aud, txt):
         inputs = {"vis": vis, "aud": aud, "txt": txt}
@@ -135,17 +166,17 @@ class ContinuousFlow(nn.Module):
             raise ValueError("No modality provided to ContinuousFlow.compute_loss")
         B, device = first.size(0), first.device
         pad_mask = {k: pads.get(k) for k in self.modality_names}
-        
+
         y = self._project(vis, aud, txt)
         # Random time t, biased slightly towards 1 if t_gamma < 1
         t = torch.rand(B, device=device)
         if self.cfg.t_gamma != 1.0:
-            t = (t ** self.cfg.t_gamma) * self.cfg.t_max
+            t = (t**self.cfg.t_gamma) * self.cfg.t_max
         else:
             t = t * self.cfg.t_max
-        
+
         x_tilde, u_target, weights = {}, {}, {}
-        
+
         active = 0
         for k in self.modality_names:
             if k not in y:
@@ -167,12 +198,12 @@ class ContinuousFlow(nn.Module):
             mr = self.cfg.mask_ratio.get(k, 0.5)
             sl = self.cfg.span_len.get(k, 6)
             s = generate_span_mask(B, Tk, mr, sl, device, pk)
-            
+
             # Construct masked input: masked -> x0, visible -> xt
             xtilde_k = torch.where(s.unsqueeze(-1), x0, xt)
             x_tilde[k] = xtilde_k
             u_target[k] = ut
-            
+
             # Loss weights
             weights[k] = self._token_weights(s, pk)
             active += 1
@@ -191,11 +222,10 @@ class ContinuousFlow(nn.Module):
                 continue
             err = (u_hat[k] - u_target[k]).pow(2)
             w = weights[k].unsqueeze(-1)
-            # Euclidean: no geometry weight (retain branch for flag compatibility)
-            if self.cfg.normalize_by_geometry:
-                loss_k = (err * w).sum() / (w.sum().clamp_min(1e-8) * self.cfg.measure_dim)
-            else:
-                loss_k = (err * w).sum() / (w.sum().clamp_min(1e-8) * self.cfg.measure_dim)
+            # Euclidean: no geometry weight
+            loss_k = (err * w).sum() / (
+                w.sum().clamp_min(1e-8) * self.cfg.measure_dim
+            )
 
             losses[f"loss_{k}"] = loss_k
             total = total + loss_k
@@ -205,16 +235,20 @@ class ContinuousFlow(nn.Module):
             "loss_vis": losses.get("loss_vis", torch.tensor(0.0, device=device)),
             "loss_aud": losses.get("loss_aud", torch.tensor(0.0, device=device)),
             "loss_txt": losses.get("loss_txt", torch.tensor(0.0, device=device)),
-            "loss_txt_usage": torch.tensor(0.0, device=device), # No gumbel usage
-            "alpha_vis": torch.tensor(-1.0, device=device), # Euclidean
+            "loss_txt_usage": torch.tensor(0.0, device=device),  # No gumbel usage
+            "alpha_vis": torch.tensor(-1.0, device=device),  # Euclidean
             "alpha_aud": torch.tensor(-1.0, device=device),
             "alpha_txt": torch.tensor(-1.0, device=device),
         }
 
     def encode_representation(
         self,
-        vis, aud, txt,
-        vis_pad=None, aud_pad=None, txt_pad=None,
+        vis,
+        aud,
+        txt,
+        vis_pad=None,
+        aud_pad=None,
+        txt_pad=None,
         t_star=1.0,
         rep_mode="hidden_attn",
         vel_proj=True,
@@ -225,10 +259,12 @@ class ContinuousFlow(nn.Module):
 
         first = next((v for v in inputs.values() if v is not None), None)
         if first is None:
-            raise ValueError("No modality provided to ContinuousFlow.encode_representation")
+            raise ValueError(
+                "No modality provided to ContinuousFlow.encode_representation"
+            )
         B, device = first.size(0), first.device
         pad_mask = {k: pads.get(k) for k in self.modality_names}
-        
+
         y = self._project(vis, aud, txt)
         t = torch.full((B,), float(t_star), device=device)
 
@@ -267,7 +303,7 @@ class ContinuousFlow(nn.Module):
             if len(parts) == 0:
                 raise ValueError("No hidden states available for pooling")
             return torch.cat(parts, dim=-1)
-        
+
         if rep_mode == "hidden_attn":
             for k in self.modality_names:
                 if k not in hidden:
@@ -290,7 +326,7 @@ class ContinuousFlow(nn.Module):
             if use_layernorm:
                 hv = self.rep_ln[k](hv)
             parts.append(hv)
-            
+
         if len(parts) == 0:
             raise ValueError("No representations available to concatenate")
         return torch.cat(parts, dim=-1)
