@@ -51,7 +51,7 @@ class VectorQuantizer(nn.Module):
         indices = torch.randperm(n)[:self.k]
         if len(indices) < self.k:
             # duplicate if not enough data
-             indices = torch.cat([indices, indices])[:self.k]
+            indices = torch.cat([indices, indices])[:self.k]
         self.codebook.data.copy_(data[indices])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
