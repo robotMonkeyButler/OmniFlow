@@ -101,6 +101,10 @@ def get_dataloaders(
     # Create train dataset first to compute normalization stats
     train_ds = dataset_class(split="train", **ds_kwargs)
 
+    # Compute and apply clipping to handle inf values
+    clip_stats = train_ds.compute_clip_stats()
+    train_ds.apply_clipping(clip_stats)
+
     # Compute normalization stats from training data
     if normalize:
         norm_stats = train_ds.compute_normalize_stats()
@@ -113,6 +117,10 @@ def get_dataloaders(
     ds_kwargs["normalize_stats"] = norm_stats
     val_ds = dataset_class(split="valid", **ds_kwargs)
     test_ds = dataset_class(split="test", **ds_kwargs)
+
+    ds_kwargs["clip_stats"] = clip_stats 
+    val_ds.apply_clipping(clip_stats)
+    test_ds.apply_clipping(clip_stats)
 
     # Apply normalization to val and test
     if norm_stats:

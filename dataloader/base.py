@@ -131,7 +131,7 @@ class BaseTriModalDataset(Dataset, ABC):
         self.normalize_stats = stats
 
     def compute_clip_stats(
-        self, margin: float = 0.0
+        self, margin: float = 0.1
     ) -> Dict[str, float]:
         """
         Compute clipping statistics (abs_max) for each modality.
@@ -168,7 +168,6 @@ class BaseTriModalDataset(Dataset, ABC):
                 abs_max = abs_max * (1.0 + margin)
 
             stats[key] = abs_max
-
         return stats
 
     def apply_clipping(self, stats: Dict[str, float]) -> None:
