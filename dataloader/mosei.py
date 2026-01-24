@@ -111,9 +111,7 @@ class MOSEIDataset(BaseTriModalDataset):
 
         self.n_samples = len(self.data[self.MODALITY_KEYS["txt"]])
 
-        # Compute and apply clipping to handle inf values
-        clip_stats = self.compute_clip_stats(margin=self.clip_margin)
-        self.apply_clipping(clip_stats)
+
 
     def _process_label(self, raw_label: Any) -> torch.Tensor:
         """Convert raw label to discrete class."""
