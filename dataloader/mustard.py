@@ -98,10 +98,3 @@ class MUStARDDataset(BaseTriModalDataset):
 
         return torch.tensor(cls, dtype=torch.long)
 
-    def get_label_names(self) -> List[str]:
-        """Get human-readable label names."""
-        return self.label_names
-
-    def get_num_classes(self) -> int:
-        """Get number of classes."""
-        return self.num_classes

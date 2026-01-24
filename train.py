@@ -399,7 +399,7 @@ def quick_downstream_testacc(
     )
     te_loader = DataLoader(TensorDataset(rep_te, y_te), batch_size=256, shuffle=False)
 
-    num_classes = int(y_tr.max().item()) + 1
+    num_classes = train_loader.dataset.get_num_classes()
     clf = Classifier(
         rep_tr.shape[1], num_classes, clf_cfg["hidden_dims"], clf_cfg["dropout"]
     ).to(device)
@@ -648,7 +648,7 @@ def run_supervised_finetune(
     if rep_dim is None:
         raise RuntimeError("Empty train_loader.")
 
-    num_classes = int(y0.max().item()) + 1
+    num_classes = train_loader.dataset.get_num_classes()
     probe = ProbeMLP(rep_dim, num_classes, hidden=256, dropout=0.1).to(device)
     print(f"[SFT] rep_dim inferred: {rep_dim}")
 
@@ -988,7 +988,7 @@ def run_classification(
     print(f"[Diagnosis] Aud std: {rep_tr[:, d:2*d].std():.4f}")
     print(f"[Diagnosis] Txt std: {rep_tr[:, 2*d:].std():.4f}")
 
-    num_classes = int(y_tr.max().item()) + 1
+    num_classes = train_loader.dataset.get_num_classes()
     for c in range(num_classes):
         mask = y_tr == c
         print(
@@ -1022,7 +1022,7 @@ def run_classification(
         TensorDataset(rep_te, y_te), batch_size=256, shuffle=False
     )
 
-    num_classes = int(y_tr.max().item()) + 1
+    num_classes = train_loader.dataset.get_num_classes()
     clf = Classifier(
         rep_tr.shape[1], num_classes, clf_cfg["hidden_dims"], clf_cfg["dropout"]
     ).to(device)

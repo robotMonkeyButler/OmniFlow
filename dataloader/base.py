@@ -34,6 +34,8 @@ class BaseTriModalDataset(Dataset, ABC):
 
     MODALITY_KEYS = {"vis": "vision", "aud": "audio", "txt": "text"}
     LABEL_KEY = "labels"
+    num_classes: int
+    label_names: List[str]
 
     def __init__(
         self,
@@ -187,6 +189,14 @@ class BaseTriModalDataset(Dataset, ABC):
                 data = np.nan_to_num(data, nan=0.0)
                 # Clip to [-abs_max, abs_max]
                 self.data[actual_key][i] = np.clip(data, -abs_max, abs_max)
+
+    def get_label_names(self) -> List[str]:
+        """Get human-readable label names."""
+        return self.label_names
+
+    def get_num_classes(self) -> int:
+        """Get number of classes."""
+        return self.num_classes
 
 
 # ============================================================

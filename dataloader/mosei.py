@@ -112,38 +112,17 @@ class MOSEIDataset(BaseTriModalDataset):
         self.n_samples = len(self.data[self.MODALITY_KEYS["txt"]])
 
 
-
     def _process_label(self, raw_label: Any) -> torch.Tensor:
         """Convert raw label to discrete class."""
-        label = np.asarray(raw_label)
-
-        # Handle different label shapes
-        if label.ndim == 2:
-            if label.shape[-1] == 7:
-                # mosei_raw.pkl format: [Sentiment, H, Sa, A, F, D, Su]
-                if self.task == "EMO":
-                    # Take argmax of last 6 for emotion
-                    emotion_scores = label[0, 1:]  # (6,)
-                    cls = int(np.argmax(emotion_scores))
-                else:
-                    # Take first dimension for sentiment
-                    label = label[0, 0]
-                    cls = self._discretize_sentiment(label)
-            else:
-                label = label.squeeze()
-                cls = self._discretize_sentiment(float(label))
-        elif label.ndim == 1:
-            if label.size == 7:
-                if self.task == "EMO":
-                    cls = int(np.argmax(label[1:]))
-                else:
-                    cls = self._discretize_sentiment(float(label[0]))
-            elif label.size == 1:
-                cls = self._discretize_sentiment(float(label[0]))
-            else:
-                cls = self._discretize_sentiment(float(label.mean()))
-        else:
-            cls = self._discretize_sentiment(float(label))
+        # mosei_raw.pkl format: [Sentiment, H, Sa, A, F, D, Su]
+        label = np.asarray(raw_label).squeeze()
+        assert label.size ==7,  f"Invalid EMO label shape: {label.shape}"
+        if self.task =='EMO':
+            cls = int(np.argmax(label[1:]))
+            assert 0 <= cls < 6, f"Invalid EMO class index: {cls}"
+        else: 
+            # task SEN
+            cls = self._discretize_sentiment(float(label[0]))
 
         return torch.tensor(cls, dtype=torch.long)
 
@@ -175,13 +154,7 @@ class MOSEIDataset(BaseTriModalDataset):
             # Default to binary
             return 0 if label < 0 else 1
 
-    def get_label_names(self) -> List[str]:
-        """Get human-readable label names."""
-        return self.label_names
 
-    def get_num_classes(self) -> int:
-        """Get number of classes."""
-        return self.num_classes
 
 
 class MOSIDataset(MOSEIDataset):

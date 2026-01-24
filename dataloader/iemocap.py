@@ -86,8 +86,3 @@ class IEMOCAPDataset(BaseTriModalDataset):
 
         return torch.tensor(cls, dtype=torch.long)
 
-    def get_label_names(self) -> List[str]:
-        return self.label_names
-
-    def get_num_classes(self) -> int:
-        return self.num_classes
