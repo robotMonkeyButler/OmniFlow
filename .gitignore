@@ -1,0 +1,7 @@
+runs
+__pycache__
+*.pkl
+.DS_Store
+*.pk
+glove
+preprocessed_data
