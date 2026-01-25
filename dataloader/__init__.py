@@ -8,14 +8,19 @@ Usage:
     train_loader, val_loader, test_loader, dims = get_dataloaders(cfg, dataset_path)
 """
 
-from typing import Dict, List, Optional, Tuple, Type
+import os
+from typing import Any, Dict, List, Optional, Tuple, Type
+
+import torch
 from torch.utils.data import DataLoader
 
 from .base import BaseTriModalDataset, collate_fn, load_raw_data, split_data
+from .hba_base import HBABaseDataset
 from .mosei import MOSEIDataset, MOSIDataset
 from .urfunny import URFunnyDataset
 from .iemocap import IEMOCAPDataset
 from .mustard import MUStARDDataset
+from .hba_cremad import CremadDataset
 
 
 # ============================================================
@@ -28,6 +33,7 @@ DATASET_REGISTRY: Dict[str, Type[BaseTriModalDataset]] = {
     "urfunny": URFunnyDataset,
     "iemocap": IEMOCAPDataset,
     "mustard": MUStARDDataset,
+    "cremad": CremadDataset,
 }
 
 
@@ -71,10 +77,23 @@ def get_dataloaders(
     normalize = ds_cfg.get("normalize", ["vis", "aud"])
 
     # Build dataset kwargs based on dataset type
-    ds_kwargs = {
-        "data_path": dataset_path,
-        "normalize": normalize,
-    }
+    ds_kwargs = {"normalize": normalize}
+
+    if dataset_name == "cremad":
+        feature_root = ds_cfg.get("feature_root")
+        if not feature_root:
+            raise ValueError("cremad dataset requires dataset.feature_root in config.")
+        if not dataset_path:
+            raise ValueError("cremad dataset expects data_path argument pointing to preprocessed root.")
+        ds_kwargs.update(
+            {
+                "feature_root": feature_root,
+                "preprocessed_data_root": dataset_path,
+                "require_triple": ds_cfg.get("require_triple", True),
+            }
+        )
+    else:
+        ds_kwargs["data_path"] = dataset_path
 
     # Add dataset-specific kwargs
     if dataset_name in ["mosei"]:
@@ -98,18 +117,50 @@ def get_dataloaders(
         raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_REGISTRY.keys())}")
     dataset_class = DATASET_REGISTRY[dataset_name]
 
-    # Create train dataset first to compute normalization stats
+    # Create train dataset first to compute/apply statistics
     train_ds = dataset_class(split="train", **ds_kwargs)
 
-    # Compute and apply clipping to handle inf values
-    clip_stats = train_ds.compute_clip_stats()
+    stats_path: Optional[str] = None
+    precomputed_stats: Optional[Dict[str, Dict[str, Any]]] = None
+
+    if dataset_path:
+        candidate_paths: List[str] = []
+        if hasattr(dataset_class, "DATASET_ID"):
+            candidate_paths.append(
+                os.path.join(dataset_path, getattr(dataset_class, "DATASET_ID"), "stats.pt")
+            )
+        candidate_paths.append(os.path.join(dataset_path, "stats.pt"))
+
+        for cand in candidate_paths:
+            if os.path.isfile(cand):
+                stats_path = cand
+                break
+
+    if stats_path:
+        precomputed_stats = torch.load(stats_path, map_location="cpu")
+        print(f"Loaded precomputed stats from {stats_path}")
+
+    if isinstance(train_ds, HBABaseDataset) and precomputed_stats is None:
+        raise FileNotFoundError(
+            "Precomputed stats not found for HBA dataset. Run scripts/preprocess_hba.py first."
+        )
+
+    if precomputed_stats is not None:
+        clip_stats = precomputed_stats.get("clip", {})
+    else:
+        clip_stats = train_ds.compute_clip_stats()
+
     train_ds.apply_clipping(clip_stats)
 
-    # Compute normalization stats from training data
     if normalize:
-        norm_stats = train_ds.compute_normalize_stats()
+        if precomputed_stats is not None:
+            norm_stats = precomputed_stats.get("normalize", {})
+            if norm_stats:
+                print("Loaded normalization stats from precomputed file")
+        else:
+            norm_stats = train_ds.compute_normalize_stats()
+            print(f"Computed normalization stats from training data for: {normalize}")
         train_ds.apply_normalization(norm_stats)
-        print(f"Computed normalization stats from training data for: {normalize}")
     else:
         norm_stats = {}
 
@@ -183,6 +234,7 @@ __all__ = [
     "MOSIDataset",
     "URFunnyDataset",
     "IEMOCAPDataset",
+    "CremadDataset",
     "GenericDataset",
     # Registry
     "DATASET_REGISTRY",
