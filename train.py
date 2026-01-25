@@ -201,31 +201,44 @@ def get_t_settings(cfg: dict):
     return use_multi_t, t_star, t_list, t_weights
 
 
-def single_representation(model, vis, aud, txt, vm, am, tm, t_star: float, cfg: dict):
+def single_representation(model, batch, t_star: float, cfg: dict):
     """Single-t representation extraction with config-based settings."""
     rep_mode, vel_proj, use_ln = get_rep_settings(cfg)
-    return model.encode_representation(
-        vis,
-        aud,
-        txt,
-        vm,
-        am,
-        tm,
-        t_star=float(t_star),
-        rep_mode=rep_mode,
-        vel_proj=vel_proj,
-        use_layernorm=use_ln,
-    )
+    # OmniFlow uses old API with positional args, new models use dict-based interface
+    if isinstance(model, OmniFlow):
+        # Old OmniFlow API
+        vis = batch.get("vis")
+        aud = batch.get("aud")
+        txt = batch.get("txt")
+        vm = batch.get("vis_pad")
+        am = batch.get("aud_pad")
+        tm = batch.get("txt_pad")
+        return model.encode_representation(
+            vis, aud, txt, vm, am, tm,
+            t_star=float(t_star),
+            rep_mode=rep_mode,
+            vel_proj=vel_proj,
+            use_layernorm=use_ln,
+        )
+    else:
+        # New dict-based interface (ContinuousFlow, DiscreteFlow)
+        return model.encode_representation(
+            batch,
+            t_star=float(t_star),
+            rep_mode=rep_mode,
+            vel_proj=vel_proj,
+            use_layernorm=use_ln,
+        )
 
 
 def multi_t_representation(
-    model, vis, aud, txt, vm, am, tm, t_list, t_weights, cfg: dict
+    model, batch, t_list, t_weights, cfg: dict
 ):
     """Multi-t representation extraction with weighted combination."""
     reps = []
     for t in t_list:
         reps.append(
-            single_representation(model, vis, aud, txt, vm, am, tm, float(t), cfg)
+            single_representation(model, batch, float(t), cfg)
         )
     reps = torch.stack(reps, dim=0)  # (M,B,D)
 
@@ -249,9 +262,10 @@ def train_epoch(model, loader, optimizer, device, cfg, asym_mask=False):
 
     asym_cfg = cfg["training"]["stage2"]["asym_mask"]
 
-    for vis, aud, txt, vm, am, tm, _ in loader:
-        vis, aud, txt = vis.to(device), aud.to(device), txt.to(device)
-        vm, am, tm = vm.to(device), am.to(device), tm.to(device)
+    for batch in loader:
+        # Move batch to device
+        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                 for k, v in batch.items()}
 
         if asym_mask and asym_cfg["enabled"]:
             target = np.random.choice(["vis", "aud", "txt"])
@@ -264,7 +278,14 @@ def train_epoch(model, loader, optimizer, device, cfg, asym_mask=False):
             model.cfg.mask_ratio = ratios
 
         optimizer.zero_grad()
-        loss_dict = model.compute_loss(vis, aud, txt, vm, am, tm)
+        # OmniFlow uses old API with positional args, new models use dict-based interface
+        if isinstance(model, OmniFlow):
+            loss_dict = model.compute_loss(
+                batch["vis"], batch["aud"], batch["txt"],
+                batch["vis_pad"], batch["aud_pad"], batch["txt_pad"]
+            )
+        else:
+            loss_dict = model.compute_loss(batch)
         loss_dict["total"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["training"]["grad_clip"])
         optimizer.step()
@@ -285,10 +306,19 @@ def validate(model, loader, device):
     original_mask_ratios = model.cfg.mask_ratio
     model.cfg.mask_ratio = {"vis": 0.3, "aud": 0.3, "txt": 0.2}
 
-    for vis, aud, txt, vm, am, tm, _ in loader:
-        vis, aud, txt = vis.to(device), aud.to(device), txt.to(device)
-        vm, am, tm = vm.to(device), am.to(device), tm.to(device)
-        loss_dict = model.compute_loss(vis, aud, txt, vm, am, tm)
+    for batch in loader:
+        # Move batch to device
+        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                 for k, v in batch.items()}
+        
+        # OmniFlow uses old API with positional args, new models use dict-based interface
+        if isinstance(model, OmniFlow):
+            loss_dict = model.compute_loss(
+                batch["vis"], batch["aud"], batch["txt"],
+                batch["vis_pad"], batch["aud_pad"], batch["txt_pad"]
+            )
+        else:
+            loss_dict = model.compute_loss(batch)
         for k in metrics:
             metrics[k] += loss_dict[f"loss_{k}" if k != "total" else k].item()
         n += 1
@@ -309,19 +339,21 @@ def extract_reps(model, loader, device, cfg=None):
     reps, labels = [], []
     use_multi_t, t_star, t_list, t_weights = get_t_settings(cfg)
 
-    for vis, aud, txt, vm, am, tm, y in loader:
-        vis, aud, txt = vis.to(device), aud.to(device), txt.to(device)
-        vm, am, tm = vm.to(device), am.to(device), tm.to(device)
+    for batch in loader:
+        # Move batch to device
+        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                 for k, v in batch.items()}
+        y = batch["labels"]
 
         if use_multi_t:
             rep = multi_t_representation(
-                model, vis, aud, txt, vm, am, tm, t_list, t_weights, cfg
+                model, batch, t_list, t_weights, cfg
             )
         else:
-            rep = single_representation(model, vis, aud, txt, vm, am, tm, t_star, cfg)
+            rep = single_representation(model, batch, t_star, cfg)
 
         reps.append(rep.cpu())
-        labels.append(y)
+        labels.append(y.cpu())
 
     return torch.cat(reps), torch.cat(labels)
 
@@ -457,17 +489,18 @@ def supft_train_epoch(
 
     use_multi_t, t_star, t_list, t_weights = get_t_settings(cfg)
 
-    for vis, aud, txt, vm, am, tm, y in loader:
-        vis, aud, txt = vis.to(device), aud.to(device), txt.to(device)
-        vm, am, tm = vm.to(device), am.to(device), tm.to(device)
-        y = y.to(device)
+    for batch in loader:
+        # Move batch to device
+        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                 for k, v in batch.items()}
+        y = batch["labels"]
 
         if use_multi_t:
             rep = multi_t_representation(
-                model, vis, aud, txt, vm, am, tm, t_list, t_weights, cfg
+                model, batch, t_list, t_weights, cfg
             )
         else:
-            rep = single_representation(model, vis, aud, txt, vm, am, tm, t_star, cfg)
+            rep = single_representation(model, batch, t_star, cfg)
 
         logits = probe(rep)
         loss = crit(logits, y)
@@ -529,17 +562,18 @@ def supft_eval(model, probe, loader, crit, device, cfg=None):
     loss_sum, correct, total = 0.0, 0, 0
     use_multi_t, t_star, t_list, t_weights = get_t_settings(cfg)
 
-    for vis, aud, txt, vm, am, tm, y in loader:
-        vis, aud, txt = vis.to(device), aud.to(device), txt.to(device)
-        vm, am, tm = vm.to(device), am.to(device), tm.to(device)
-        y = y.to(device)
+    for batch in loader:
+        # Move batch to device
+        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                 for k, v in batch.items()}
+        y = batch["labels"]
 
         if use_multi_t:
             rep = multi_t_representation(
-                model, vis, aud, txt, vm, am, tm, t_list, t_weights, cfg
+                model, batch, t_list, t_weights, cfg
             )
         else:
-            rep = single_representation(model, vis, aud, txt, vm, am, tm, t_star, cfg)
+            rep = single_representation(model, batch, t_star, cfg)
 
         logits = probe(rep)
         loss = crit(logits, y)
@@ -637,13 +671,14 @@ def run_supervised_finetune(
     # Dynamically infer rep_dim from one batch (important for velocity modes)
     rep_dim = None
     y0 = None
-    for vis, aud, txt, vm, am, tm, y in train_loader:
-        vis, aud, txt = vis.to(device), aud.to(device), txt.to(device)
-        vm, am, tm = vm.to(device), am.to(device), tm.to(device)
+    for batch in train_loader:
+        # Move batch to device
+        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                 for k, v in batch.items()}
         with torch.no_grad():
-            rep = single_representation(model, vis, aud, txt, vm, am, tm, 1.0, cfg)
+            rep = single_representation(model, batch, 1.0, cfg)
         rep_dim = int(rep.shape[1])
-        y0 = y
+        y0 = batch["labels"]
         break
     if rep_dim is None:
         raise RuntimeError("Empty train_loader.")
@@ -990,14 +1025,14 @@ def run_classification(
 
     num_classes = train_loader.dataset.get_num_classes()
     for c in range(num_classes):
-        mask = y_tr == c
+        mask = (y_tr == c).to(rep_tr.device)
         print(
             f"[Diagnosis] Class {c}: n={mask.sum().item()}, rep_mean={rep_tr[mask].mean():.4f}, rep_std={rep_tr[mask].std():.4f}"
         )
 
     if num_classes == 2:
-        rep_0 = rep_tr[y_tr == 0].mean(dim=0)
-        rep_1 = rep_tr[y_tr == 1].mean(dim=0)
+        rep_0 = rep_tr[(y_tr == 0).to(rep_tr.device)].mean(dim=0)
+        rep_1 = rep_tr[(y_tr == 1).to(rep_tr.device)].mean(dim=0)
         dist = (rep_0 - rep_1).norm()
         print(f"[Diagnosis] Class center distance: {dist:.4f}")
 

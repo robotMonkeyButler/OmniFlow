@@ -14,7 +14,7 @@ model:
   dropout: 0.1
   share_layers: false
   adapter_hidden: 512
-  modalities: ["vis", "aud"]    # choices: ["vis", "aud", "txt"], apply to ContinuousFlow and DiscreteFlow
+  # modalities: ["vis", "aud"]    # choices: ["vis", "aud", "txt"], apply to ContinuousFlow and DiscreteFlow
 
 # ----------------------
 # Quantization (for DiscreteFlow)
@@ -172,10 +172,10 @@ training:
 # ----------------------
 dataset:
   # Dataset name: mosei, mosi, urfunny, iemocap, generic
-  name: "urfunny"
+  name: "mimic"
   
   # Task type (for MOSEI only): "SEN" (sentiment) or "EMO" (emotion)
-  task: "SEN"
+  task: "MOR"
   
   # Number of classes:
   #   - MOSEI SEN: 2/3/5/7
@@ -191,8 +191,8 @@ dataset:
   # Pin memory for GPU transfer
   pin_memory: false
   
-  # Which modalities to normalize (default: ["vis", "aud"])
-  normalize: ["vis", "aud"]
+  # Which modalities to normalize (default: ["vis", "aud"] for standard datasets, ["timeseries", "static"] for MIMIC)
+  normalize: ["timeseries", "static"]
   
   # Label key in data (for generic dataset)
   label_key: "labels"

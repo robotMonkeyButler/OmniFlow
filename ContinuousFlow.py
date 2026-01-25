@@ -40,7 +40,14 @@ class ContinuousFlow(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg or FlowConfig()
-        self.modality_names = modality_names or self.MODALITIES
+        available = list(dims.keys())
+        if modality_names is None or len(modality_names) == 0:
+            self.modality_names = available
+        else:
+            missing = [m for m in modality_names if m not in dims]
+            if missing:
+                raise ValueError(f"Missing dims for modalities: {missing}")
+            self.modality_names = modality_names
 
         self.projs = nn.ModuleDict()
         for k in self.modality_names:
@@ -140,14 +147,12 @@ class ContinuousFlow(nn.Module):
                     for p in self.vf_net.layers[m][i].parameters():
                         p.requires_grad = True
 
-    def _project(self, vis, aud, txt):
-        inputs = {"vis": vis, "aud": aud, "txt": txt}
+    def _project(self, inputs: Dict[str, torch.Tensor]):
+        """Project input modalities to d_model."""
         out = {}
         for k in self.modality_names:
-            xk = inputs.get(k)
-            if xk is None:
-                continue
-            out[k] = self.projs[k](xk)
+            if k in inputs:
+                out[k] = self.projs[k](inputs[k])
         return out
 
     def _token_weights(self, span_mask, pad_mask):
@@ -156,17 +161,31 @@ class ContinuousFlow(nn.Module):
             w = w.masked_fill(pad_mask, 0.0)
         return w
 
-    def compute_loss(self, vis, aud, txt, vis_pad=None, aud_pad=None, txt_pad=None):
-        inputs = {"vis": vis, "aud": aud, "txt": txt}
-        pads = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
-
-        first = next((v for v in inputs.values() if v is not None), None)
-        if first is None:
+    def compute_loss(self, batch: Dict[str, torch.Tensor]):
+        """
+        Compute flow matching loss.
+        
+        Args:
+            batch: Dict with keys:
+                - <modality_name>: (B, T, D) tensors
+                - <modality_name>_pad: (B, T) bool masks
+                - labels: (B,) labels (not used in unsupervised loss)
+        """
+        device = batch["labels"].device
+        B = batch["labels"].size(0)
+        
+        # Extract modalities and padding masks
+        inputs = {}
+        pad_mask = {}
+        for k in self.modality_names:
+            if k in batch:
+                inputs[k] = batch[k]
+                pad_mask[k] = batch.get(f"{k}_pad")
+        
+        if len(inputs) == 0:
             raise ValueError("No modality provided to ContinuousFlow.compute_loss")
-        B, device = first.size(0), first.device
-        pad_mask = {k: pads.get(k) for k in self.modality_names}
 
-        y = self._project(vis, aud, txt)
+        y = self._project(inputs)
         # Random time t, biased slightly towards 1 if t_gamma < 1
         t = torch.rand(B, device=device)
         if self.cfg.t_gamma != 1.0:
@@ -229,42 +248,58 @@ class ContinuousFlow(nn.Module):
             losses[f"loss_{k}"] = loss_k
             total = total + loss_k
 
-        return {
-            "total": total,
-            "loss_vis": losses.get("loss_vis", torch.tensor(0.0, device=device)),
-            "loss_aud": losses.get("loss_aud", torch.tensor(0.0, device=device)),
-            "loss_txt": losses.get("loss_txt", torch.tensor(0.0, device=device)),
-            "loss_txt_usage": torch.tensor(0.0, device=device),  # No gumbel usage
-            "alpha_vis": torch.tensor(-1.0, device=device),  # Euclidean
-            "alpha_aud": torch.tensor(-1.0, device=device),
-            "alpha_txt": torch.tensor(-1.0, device=device),
-        }
+        # Build return dict with all possible modality keys for compatibility
+        result = {"total": total, "loss_txt_usage": torch.tensor(0.0, device=device)}
+
+        # Include actual modality-specific losses (e.g., loss_timeseries, loss_static)
+        for k in self.modality_names:
+            loss_key = f"loss_{k}"
+            if loss_key in losses:
+                result[loss_key] = losses[loss_key]
+                # Euclidean geometry: alpha is fixed at -1.0 for all modalities
+                result[f"alpha_{k}"] = torch.tensor(-1.0, device=device)
+
+        # Legacy keys for compatibility with code expecting vis/aud/txt metrics
+        for k in ["vis", "aud", "txt"]:
+            result[f"loss_{k}"] = losses.get(f"loss_{k}", torch.tensor(0.0, device=device))
+            result[f"alpha_{k}"] = torch.tensor(-1.0, device=device)  # Euclidean
+        return result
 
     def encode_representation(
         self,
-        vis,
-        aud,
-        txt,
-        vis_pad=None,
-        aud_pad=None,
-        txt_pad=None,
+        batch: Dict[str, torch.Tensor],
         t_star=1.0,
         rep_mode="hidden_attn",
         vel_proj=True,
         use_layernorm=True,
     ):
-        inputs = {"vis": vis, "aud": aud, "txt": txt}
-        pads = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
-
-        first = next((v for v in inputs.values() if v is not None), None)
-        if first is None:
+        """
+        Encode representation from batch.
+        
+        Args:
+            batch: Dict with modality tensors and padding masks
+            t_star: Time point for encoding
+            rep_mode: Representation mode
+            vel_proj: Whether to project velocity
+            use_layernorm: Whether to use layer normalization
+        """
+        device = batch["labels"].device
+        B = batch["labels"].size(0)
+        
+        # Extract modalities and padding masks
+        inputs = {}
+        pad_mask = {}
+        for k in self.modality_names:
+            if k in batch:
+                inputs[k] = batch[k]
+                pad_mask[k] = batch.get(f"{k}_pad")
+        
+        if len(inputs) == 0:
             raise ValueError(
                 "No modality provided to ContinuousFlow.encode_representation"
             )
-        B, device = first.size(0), first.device
-        pad_mask = {k: pads.get(k) for k in self.modality_names}
 
-        y = self._project(vis, aud, txt)
+        y = self._project(inputs)
         t = torch.full((B,), float(t_star), device=device)
 
         x1 = {}

@@ -20,16 +20,19 @@ import torch.nn.functional as F
 # ============================================================
 
 
-class BaseTriModalDataset(Dataset, ABC):
+class BaseMultiModalDataset(Dataset, ABC):
     """
-    Abstract base class for tri-modal (vision, audio, text) datasets.
+    Abstract base class for multi-modal datasets.
 
     Subclasses must implement:
         - _load_data(): Load raw data from file
         - _process_label(raw_label): Convert raw label to tensor
 
-    The __getitem__ method returns (vis, aud, txt, label) tuple,
+    The __getitem__ method returns (*modalities, label) tuple,
     compatible with the shared collate_fn.
+    
+    By default supports tri-modal (vis/aud/txt) setup for backward compatibility.
+    Subclasses can override MODALITY_KEYS to define custom modalities.
     """
 
     MODALITY_KEYS = {"vis": "vision", "aud": "audio", "txt": "text"}
@@ -77,59 +80,56 @@ class BaseTriModalDataset(Dataset, ABC):
     def __len__(self) -> int:
         return self.n_samples
 
-    def __getitem__(
-        self, idx: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
         """
         Returns:
-            vis: (T, D_vis) vision features
-            aud: (T, D_aud) audio features
-            txt: (T, D_txt) text features
+            *modalities: One tensor per modality (T, D_modality)
             label: () scalar label
         """
-        vis_key = self.MODALITY_KEYS["vis"]
-        aud_key = self.MODALITY_KEYS["aud"]
-        txt_key = self.MODALITY_KEYS["txt"]
-
-        vis = torch.tensor(self.data[vis_key][idx], dtype=torch.float32)
-        aud = torch.tensor(self.data[aud_key][idx], dtype=torch.float32)
-        txt = torch.tensor(self.data[txt_key][idx], dtype=torch.float32)
+        modality_tensors = []
+        for modality_name in self.get_modality_names():
+            storage_key = self.MODALITY_KEYS[modality_name]
+            tensor = torch.tensor(self.data[storage_key][idx], dtype=torch.float32)
+            modality_tensors.append(tensor)
+        
         label = self._process_label(self.data[self.LABEL_KEY][idx])
+        return tuple(modality_tensors + [label])
 
-        return vis, aud, txt, label
-
+    def get_modality_names(self) -> List[str]:
+        """Get list of modality names in order."""
+        return list(self.MODALITY_KEYS.keys())
+    
     def get_dims(self) -> Dict[str, int]:
         """Get feature dimensions for each modality."""
-        vis_key = self.MODALITY_KEYS["vis"]
-        aud_key = self.MODALITY_KEYS["aud"]
-        txt_key = self.MODALITY_KEYS["txt"]
-
-        return {
-            "vis": int(self.data[vis_key][0].shape[-1]),
-            "aud": int(self.data[aud_key][0].shape[-1]),
-            "txt": int(self.data[txt_key][0].shape[-1]),
-        }
+        dims = {}
+        for modality_name, storage_key in self.MODALITY_KEYS.items():
+            dims[modality_name] = int(self.data[storage_key][0].shape[-1])
+        return dims
 
     def compute_normalize_stats(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
         """Compute normalization statistics (mean, std) for each modality."""
         stats = {}
-        for key in self.normalize_keys:
-            actual_key = self.MODALITY_KEYS[key]
-            all_data = np.concatenate(self.data[actual_key], axis=0)
+        for modality_name in self.normalize_keys:
+            if modality_name not in self.MODALITY_KEYS:
+                raise ValueError(f"Modality '{modality_name}' not found in MODALITY_KEYS")
+            storage_key = self.MODALITY_KEYS[modality_name]
+            all_data = np.concatenate(self.data[storage_key], axis=0)
             mean = all_data.mean(axis=0)
             std = all_data.std(axis=0)
             std[std < 1e-6] = 1.0
-            stats[key] = (mean, std)
+            stats[modality_name] = (mean, std)
         return stats
 
     def apply_normalization(
         self, stats: Dict[str, Tuple[np.ndarray, np.ndarray]]
     ) -> None:
         """Apply normalization using pre-computed statistics."""
-        for key, (mean, std) in stats.items():
-            actual_key = self.MODALITY_KEYS[key]
-            for i in range(len(self.data[actual_key])):
-                self.data[actual_key][i] = (self.data[actual_key][i] - mean) / std
+        for modality_name, (mean, std) in stats.items():
+            if modality_name not in self.MODALITY_KEYS:
+                raise ValueError(f"Modality '{modality_name}' not found in MODALITY_KEYS")
+            storage_key = self.MODALITY_KEYS[modality_name]
+            for i in range(len(self.data[storage_key])):
+                self.data[storage_key][i] = (self.data[storage_key][i] - mean) / std
         self.normalize_stats = stats
 
     def compute_clip_stats(
@@ -143,17 +143,11 @@ class BaseTriModalDataset(Dataset, ABC):
             margin: Extra margin to add to abs_max (e.g., 0.1 for 10% buffer)
 
         Returns:
-            Dictionary mapping modality keys to clip values
-            {
-                "vis": abs_max_vis,
-                "aud": abs_max_aud,
-                "txt": abs_max_txt,
-            }
+            Dictionary mapping modality names to clip values
         """
         stats = {}
-        for key in self.MODALITY_KEYS.keys():
-            actual_key = self.MODALITY_KEYS[key]
-            all_data = np.concatenate(self.data[actual_key], axis=0)
+        for modality_name, storage_key in self.MODALITY_KEYS.items():
+            all_data = np.concatenate(self.data[storage_key], axis=0)
 
             # Keep only finite values (remove inf and nan)
             finite_mask = np.isfinite(all_data)
@@ -169,7 +163,7 @@ class BaseTriModalDataset(Dataset, ABC):
             if margin > 0:
                 abs_max = abs_max * (1.0 + margin)
 
-            stats[key] = abs_max
+            stats[modality_name] = abs_max
         return stats
 
     def apply_clipping(self, stats: Dict[str, float]) -> None:
@@ -178,17 +172,19 @@ class BaseTriModalDataset(Dataset, ABC):
         Replaces NaN values with 0.
 
         Args:
-            stats: Dictionary mapping modality keys to clip values
+            stats: Dictionary mapping modality names to clip values
                    (output from compute_clip_stats)
         """
-        for key, abs_max in stats.items():
-            actual_key = self.MODALITY_KEYS[key]
-            for i in range(len(self.data[actual_key])):
-                data = self.data[actual_key][i]
+        for modality_name, abs_max in stats.items():
+            if modality_name not in self.MODALITY_KEYS:
+                raise ValueError(f"Modality '{modality_name}' not found in MODALITY_KEYS")
+            storage_key = self.MODALITY_KEYS[modality_name]
+            for i in range(len(self.data[storage_key])):
+                data = self.data[storage_key][i]
                 # Replace NaN with 0
                 data = np.nan_to_num(data, nan=0.0)
                 # Clip to [-abs_max, abs_max]
-                self.data[actual_key][i] = np.clip(data, -abs_max, abs_max)
+                self.data[storage_key][i] = np.clip(data, -abs_max, abs_max)
 
     def get_label_names(self) -> List[str]:
         """Get human-readable label names."""
@@ -204,44 +200,107 @@ class BaseTriModalDataset(Dataset, ABC):
 # ============================================================
 
 
-def collate_fn(batch: List[Tuple]) -> Tuple[torch.Tensor, ...]:
+def collate_fn_with_names(batch: List[Tuple], modality_names: List[str]) -> Dict[str, torch.Tensor]:
     """
-    Collate function for tri-modal data with padding.
-    Pads all modalities to the same max length across all modalities.
+    Collate function for multi-modal data with padding.
+    Returns dict with modality names as keys for semantic clarity.
 
     Args:
-        batch: List of (vis, aud, txt, label) tuples
+        batch: List of (*modalities, label) tuples
+        modality_names: List of modality names in order (e.g., ["vis", "aud", "txt"])
 
     Returns:
-        vis, aud, txt: Padded tensors (B, T, D)
-        vis_pad, aud_pad, txt_pad: Padding masks (B, T), True = padded position
-        labels: Label tensor (B,)
+        Dictionary with:
+            - <modality_name>: Padded tensor (B, T, D) for each modality
+            - <modality_name>_pad: Padding mask (B, T), True = padded
+            - labels: Label tensor (B,)
     """
-    vis_list, aud_list, txt_list, y_list = zip(*batch)
-
-    lens = {
-        "vis": torch.tensor([v.size(0) for v in vis_list]),
-        "aud": torch.tensor([a.size(0) for a in aud_list]),
-        "txt": torch.tensor([t.size(0) for t in txt_list]),
-    }
-
-    vis = pad_sequence(vis_list, batch_first=True)
-    aud = pad_sequence(aud_list, batch_first=True)
-    txt = pad_sequence(txt_list, batch_first=True)
-
-    # Pad to same max length across all modalities
-    maxT = max(vis.size(1), aud.size(1), txt.size(1))
-    vis = F.pad(vis, (0, 0, 0, maxT - vis.size(1)))
-    aud = F.pad(aud, (0, 0, 0, maxT - aud.size(1)))
-    txt = F.pad(txt, (0, 0, 0, maxT - txt.size(1)))
-
-    B = vis.size(0)
+    num_modalities = len(modality_names)
+    modality_lists = [[] for _ in range(num_modalities)]
+    label_list = []
+    
+    for item in batch:
+        for i in range(num_modalities):
+            modality_lists[i].append(item[i])
+        label_list.append(item[-1])
+    
+    # Get lengths for each modality
+    lens = {}
+    for i in range(num_modalities):
+        lens[i] = torch.tensor([m.size(0) for m in modality_lists[i]])
+    
+    # Pad each modality
+    padded_modalities = []
+    for i in range(num_modalities):
+        padded = pad_sequence(modality_lists[i], batch_first=True)
+        padded_modalities.append(padded)
+    
+    # Find max length across all modalities
+    maxT = max(m.size(1) for m in padded_modalities)
+    
+    # Pad all to same max length
+    for i in range(num_modalities):
+        if padded_modalities[i].size(1) < maxT:
+            padded_modalities[i] = F.pad(
+                padded_modalities[i], 
+                (0, 0, 0, maxT - padded_modalities[i].size(1))
+            )
+    
+    # Create padding masks and build result dict
+    B = padded_modalities[0].size(0)
     ar = torch.arange(maxT).unsqueeze(0).expand(B, maxT)
-    vis_pad = ar >= lens["vis"].unsqueeze(1)
-    aud_pad = ar >= lens["aud"].unsqueeze(1)
-    txt_pad = ar >= lens["txt"].unsqueeze(1)
+    
+    result = {}
+    for i, name in enumerate(modality_names):
+        result[name] = padded_modalities[i]
+        result[f"{name}_pad"] = ar >= lens[i].unsqueeze(1)
+    
+    result["labels"] = torch.stack(label_list)
+    return result
 
-    return vis, aud, txt, vis_pad, aud_pad, txt_pad, torch.stack(y_list)
+
+def collate_fn(batch: List[Tuple]) -> Tuple[torch.Tensor, ...]:
+    """
+    Backward-compatible collate for tri-modal (vis/aud/txt) data.
+    Returns tuple format for legacy code.
+    """
+    modality_names = ["vis", "aud", "txt"]
+    batch_dict = collate_fn_with_names(batch, modality_names)
+    return (
+        batch_dict["vis"], batch_dict["aud"], batch_dict["txt"],
+        batch_dict["vis_pad"], batch_dict["aud_pad"], batch_dict["txt_pad"],
+        batch_dict["labels"]
+    )
+
+
+class CollateFunction:
+    """
+    Collate function wrapper that can be pickled for multiprocessing.
+    This replaces the nested function approach which can't be pickled.
+    """
+    def __init__(self, modality_names: List[str]):
+        self.modality_names = modality_names
+    
+    def __call__(self, batch: List[Tuple]) -> Dict[str, torch.Tensor]:
+        return collate_fn_with_names(batch, self.modality_names)
+
+
+def create_collate_fn(modality_names: List[str]):
+    """
+    Factory to create a collate function for specific modality names.
+    Returns a dict-based collate function that can be pickled.
+    
+    Args:
+        modality_names: List of modality names (e.g., ["timeseries", "static"])
+    
+    Returns:
+        CollateFunction instance that can be pickled for multiprocessing
+    """
+    return CollateFunction(modality_names)
+
+
+# Backward compatibility alias
+BaseTriModalDataset = BaseMultiModalDataset
 
 
 # ============================================================
