@@ -16,18 +16,20 @@ from .mosei import MOSEIDataset, MOSIDataset
 from .urfunny import URFunnyDataset
 from .iemocap import IEMOCAPDataset
 from .mustard import MUStARDDataset
+from .mimic import MIMICDataset, collate_fn_mimic
 
 
 # ============================================================
 # Dataset Registry
 # ============================================================
 
-DATASET_REGISTRY: Dict[str, Type[BaseTriModalDataset]] = {
+DATASET_REGISTRY: Dict[str, Type] = {
     "mosei": MOSEIDataset,
     "mosi": MOSIDataset,
     "urfunny": URFunnyDataset,
     "iemocap": IEMOCAPDataset,
     "mustard": MUStARDDataset,
+    "mimic": MIMICDataset,
 }
 
 
@@ -86,12 +88,18 @@ def get_dataloaders(
         ds_kwargs["num_classes"] = ds_cfg.get("num_classes", 4)
     elif dataset_name in ["mustard"]:
         ds_kwargs["task"] = ds_cfg.get("task", "SAR")
+    elif dataset_name in ["mimic"]:
+        normalize = ds_cfg.get("normalize", ["timeseries", "static"])
+        ds_kwargs["task"] = ds_cfg.get("task", "MOR")
     elif dataset_name == "generic":
         # Get modality keys from config
         modality_keys_cfg = ds_cfg.get("modality_keys", {})
         if dataset_name in modality_keys_cfg:
             ds_kwargs["modality_keys"] = modality_keys_cfg[dataset_name]
         ds_kwargs["label_key"] = ds_cfg.get("label_key", "labels")
+
+    # Ensure normalize in kwargs reflects any dataset-specific override
+    ds_kwargs["normalize"] = normalize
 
     # Get dataset class from registry
     if dataset_name not in DATASET_REGISTRY:
@@ -135,11 +143,13 @@ def get_dataloaders(
     )
 
     # Create dataloaders
+    chosen_collate = collate_fn_mimic if dataset_name == "mimic" else collate_fn
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate_fn,
+        collate_fn=chosen_collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
@@ -147,7 +157,7 @@ def get_dataloaders(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=chosen_collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
@@ -155,7 +165,7 @@ def get_dataloaders(
         test_ds,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=chosen_collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
