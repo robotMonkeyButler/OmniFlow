@@ -11,12 +11,12 @@ Usage:
 from typing import Dict, List, Optional, Tuple, Type
 from torch.utils.data import DataLoader
 
-from .base import BaseTriModalDataset, collate_fn, load_raw_data, split_data
+from .base import BaseMultiModalDataset, BaseTriModalDataset, collate_fn, collate_fn_with_names, create_collate_fn, load_raw_data, split_data
 from .mosei import MOSEIDataset, MOSIDataset
 from .urfunny import URFunnyDataset
 from .iemocap import IEMOCAPDataset
 from .mustard import MUStARDDataset
-from .mimic import MIMICDataset, collate_fn_mimic
+from .mimic import MIMICDataset
 
 
 # ============================================================
@@ -33,7 +33,7 @@ DATASET_REGISTRY: Dict[str, Type] = {
 }
 
 
-def register_dataset(name: str, dataset_class: Type[BaseTriModalDataset]) -> None:
+def register_dataset(name: str, dataset_class: Type[BaseMultiModalDataset]) -> None:
     """Register a new dataset class."""
     DATASET_REGISTRY[name.lower()] = dataset_class
 
@@ -70,7 +70,7 @@ def get_dataloaders(
     batch_size = cfg.get("training", {}).get("batch_size", 32)
     num_workers = ds_cfg.get("num_workers", 0)
     pin_memory = ds_cfg.get("pin_memory", False)
-    normalize = ds_cfg.get("normalize", ["vis", "aud"])
+    normalize = ds_cfg.get("normalize", ["vis", "aud", "text"])
 
     # Build dataset kwargs based on dataset type
     ds_kwargs = {
@@ -89,7 +89,8 @@ def get_dataloaders(
     elif dataset_name in ["mustard"]:
         ds_kwargs["task"] = ds_cfg.get("task", "SAR")
     elif dataset_name in ["mimic"]:
-        normalize = ds_cfg.get("normalize", ["timeseries", "static"])
+        # mimic input modalities are not default vis/aud/txt
+        ds_kwargs["normalize"] = ds_cfg.get("normalize", ["timeseries", "static"])
         ds_kwargs["task"] = ds_cfg.get("task", "MOR")
     elif dataset_name == "generic":
         # Get modality keys from config
@@ -99,6 +100,7 @@ def get_dataloaders(
         ds_kwargs["label_key"] = ds_cfg.get("label_key", "labels")
 
     # Ensure normalize in kwargs reflects any dataset-specific override
+    # (but don't override MIMIC's special normalize which was already set above)
     ds_kwargs["normalize"] = normalize
 
     # Get dataset class from registry
@@ -114,10 +116,10 @@ def get_dataloaders(
     train_ds.apply_clipping(clip_stats)
 
     # Compute normalization stats from training data
-    if normalize:
+    if ds_kwargs.get("normalize"):
         norm_stats = train_ds.compute_normalize_stats()
         train_ds.apply_normalization(norm_stats)
-        print(f"Computed normalization stats from training data for: {normalize}")
+        print(f"Computed normalization stats from training data for: {ds_kwargs['normalize']}")
     else:
         norm_stats = {}
 
@@ -142,8 +144,9 @@ def get_dataloaders(
         f"Dataset: {dataset_name} | Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}"
     )
 
-    # Create dataloaders
-    chosen_collate = collate_fn_mimic if dataset_name == "mimic" else collate_fn
+    # Create collate function with dataset's modality names
+    modality_names = train_ds.get_modality_names()
+    chosen_collate = create_collate_fn(modality_names)
 
     train_loader = DataLoader(
         train_ds,
@@ -186,14 +189,19 @@ __all__ = [
     "get_dataloaders",
     "setup_data",
     # Base classes
-    "BaseTriModalDataset",
+    "BaseMultiModalDataset",
+    "BaseTriModalDataset",  # Backward compatibility
     "collate_fn",
+    "collate_fn_with_names",
+    "create_collate_fn",
     # Dataset classes
     "MOSEIDataset",
     "MOSIDataset",
     "URFunnyDataset",
     "IEMOCAPDataset",
     "GenericDataset",
+    "MUStARDDataset",
+    "MIMICDataset",
     # Registry
     "DATASET_REGISTRY",
     "register_dataset",

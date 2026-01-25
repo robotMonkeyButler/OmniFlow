@@ -84,7 +84,14 @@ class DiscreteFlow(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg or FlowConfig()
-        self.modality_names = modality_names or ["vis", "aud", "txt"]
+        available = list(dims.keys())
+        if modality_names is None or len(modality_names) == 0:
+            self.modality_names = available
+        else:
+            missing = [m for m in modality_names if m not in dims]
+            if missing:
+                raise ValueError(f"Missing dims for modalities: {missing}")
+            self.modality_names = modality_names
 
         # Use measure_dim as the default codebook/vocab size; allow optional override via quantizer_k
         self.vocab_size = (
@@ -190,14 +197,16 @@ class DiscreteFlow(nn.Module):
         max_samples = 4096 * 4
 
         total = 0
-        for batch in dataloader:
+        for batch_dict in dataloader:
             if total >= max_samples:
                 break
-            vis, aud, txt, _, _, _, _ = batch
-            data_map = {"vis": vis, "aud": aud, "txt": txt}
             for k in self.modality_names:
-                data_store[k].append(data_map[k])
-            total += vis.size(0) * vis.size(1)  # num tokens
+                if k in batch_dict:
+                    data_store[k].append(batch_dict[k])
+            # Count tokens from first modality
+            first_mod = next(iter(self.modality_names))
+            if first_mod in batch_dict:
+                total += batch_dict[first_mod].size(0) * batch_dict[first_mod].size(1)
 
         for k in self.modality_names:
             if len(data_store[k]) > 0:
@@ -208,15 +217,13 @@ class DiscreteFlow(nn.Module):
 
         print("Codebooks initialized.")
 
-    def _get_indices(self, vis, aud, txt):
-        inputs = {"vis": vis, "aud": aud, "txt": txt}
+    def _get_indices(self, inputs: Dict[str, torch.Tensor]):
+        """Get VQ indices for each modality."""
         out = {}
         with torch.no_grad():
             for k in self.modality_names:
-                xk = inputs.get(k)
-                if xk is None:
-                    continue
-                out[k] = self.quantizers[k](xk)
+                if k in inputs:
+                    out[k] = self.quantizers[k](inputs[k])
         return out
 
     def _token_weights(self, span_mask, pad_mask):
@@ -225,17 +232,31 @@ class DiscreteFlow(nn.Module):
             w = w.masked_fill(pad_mask, 0.0)
         return w
 
-    def compute_loss(self, vis, aud, txt, vis_pad=None, aud_pad=None, txt_pad=None):
-        inputs = {"vis": vis, "aud": aud, "txt": txt}
-        pads = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
-
-        first = next((v for v in inputs.values() if v is not None), None)
-        if first is None:
+    def compute_loss(self, batch: Dict[str, torch.Tensor]):
+        """
+        Compute flow matching loss.
+        
+        Args:
+            batch: Dict with keys:
+                - <modality_name>: (B, T, D) tensors
+                - <modality_name>_pad: (B, T) bool masks
+                - labels: (B,) labels
+        """
+        device = batch["labels"].device
+        B = batch["labels"].size(0)
+        
+        # Extract modalities and padding masks
+        inputs = {}
+        pad_mask = {}
+        for k in self.modality_names:
+            if k in batch:
+                inputs[k] = batch[k]
+                pad_mask[k] = batch.get(f"{k}_pad")
+        
+        if len(inputs) == 0:
             raise ValueError("No modality provided to DiscreteFlow.compute_loss")
-        B, device = first.size(0), first.device
-        pad_mask = {k: pads.get(k) for k in self.modality_names}
 
-        indices = self._get_indices(vis, aud, txt)
+        indices = self._get_indices(inputs)
         if len(indices) == 0:
             raise ValueError("No active modalities for loss computation")
 
@@ -291,43 +312,65 @@ class DiscreteFlow(nn.Module):
             losses[f"loss_{k}"] = loss_k
             total += loss_k
 
-        return {
+        # Build return dict with all possible modality keys for compatibility,
+        # while also exposing actual modality-specific losses.
+        result: Dict[str, torch.Tensor] = {
             "total": total,
-            "loss_vis": losses.get("loss_vis", torch.tensor(0.0, device=device)),
-            "loss_aud": losses.get("loss_aud", torch.tensor(0.0, device=device)),
-            "loss_txt": losses.get("loss_txt", torch.tensor(0.0, device=device)),
             "loss_txt_usage": torch.tensor(0.0, device=device),
-            "alpha_vis": torch.tensor(1.0, device=device),
-            "alpha_aud": torch.tensor(1.0, device=device),
-            "alpha_txt": torch.tensor(1.0, device=device),
         }
+
+        # Include losses and alphas for all active modalities (e.g., timeseries, static).
+        for k in self.modality_names:
+            loss_key = f"loss_{k}"
+            if loss_key in losses:
+                result[loss_key] = losses[loss_key]
+                result[f"alpha_{k}"] = torch.tensor(1.0, device=device)
+
+        # Backward-compatible vis/aud/txt keys expected by some training loops.
+        for legacy_k in ["vis", "aud", "txt"]:
+            loss_key = f"loss_{legacy_k}"
+            if loss_key not in result:
+                # Use zero when that modality is not present.
+                result[loss_key] = torch.tensor(0.0, device=device)
+            if f"alpha_{legacy_k}" not in result:
+                result[f"alpha_{legacy_k}"] = torch.tensor(1.0, device=device)
+        return result
 
     def encode_representation(
         self,
-        vis: torch.Tensor,
-        aud: torch.Tensor,
-        txt: torch.Tensor,
-        vis_pad: Optional[torch.Tensor] = None,
-        aud_pad: Optional[torch.Tensor] = None,
-        txt_pad: Optional[torch.Tensor] = None,
+        batch: Dict[str, torch.Tensor],
         t_star: float = 1.0,
         rep_mode: str = "hidden_attn",
         vel_proj: bool = True,
         use_layernorm: bool = True,
     ) -> torch.Tensor:
-
-        inputs = {"vis": vis, "aud": aud, "txt": txt}
-        pads = {"vis": vis_pad, "aud": aud_pad, "txt": txt_pad}
-
-        first = next((v for v in inputs.values() if v is not None), None)
-        if first is None:
+        """
+        Encode representation from batch.
+        
+        Args:
+            batch: Dict with modality tensors and padding masks
+            t_star: Time point for encoding
+            rep_mode: Representation mode
+            vel_proj: Whether to project velocity
+            use_layernorm: Whether to use layer normalization
+        """
+        device = batch["labels"].device
+        B = batch["labels"].size(0)
+        
+        # Extract modalities and padding masks
+        inputs = {}
+        pad_mask = {}
+        for k in self.modality_names:
+            if k in batch:
+                inputs[k] = batch[k]
+                pad_mask[k] = batch.get(f"{k}_pad")
+        
+        if len(inputs) == 0:
             raise ValueError(
                 "No modality provided to DiscreteFlow.encode_representation"
             )
-        B, device = first.size(0), first.device
-        pad_mask = {k: pads.get(k) for k in self.modality_names}
 
-        indices = self._get_indices(vis, aud, txt)
+        indices = self._get_indices(inputs)
         if len(indices) == 0:
             raise ValueError("No active modalities for representation encoding")
         t = torch.full((B,), float(t_star), device=device)
@@ -394,24 +437,14 @@ class DiscreteFlow(nn.Module):
     @torch.no_grad()
     def extract_representation(
         self,
-        vis: torch.Tensor,
-        aud: torch.Tensor,
-        txt: torch.Tensor,
-        vis_pad: Optional[torch.Tensor] = None,
-        aud_pad: Optional[torch.Tensor] = None,
-        txt_pad: Optional[torch.Tensor] = None,
+        batch: Dict[str, torch.Tensor],
         t_star: float = 1.0,
         rep_mode: str = "hidden_attn",
         vel_proj: bool = True,
         use_layernorm: bool = True,
     ) -> torch.Tensor:
         return self.encode_representation(
-            vis,
-            aud,
-            txt,
-            vis_pad,
-            aud_pad,
-            txt_pad,
+            batch,
             t_star=t_star,
             rep_mode=rep_mode,
             vel_proj=vel_proj,

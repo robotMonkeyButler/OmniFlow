@@ -11,10 +11,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from .base import BaseTriModalDataset, load_raw_data, split_data
+from .base import BaseMultiModalDataset, load_raw_data, split_data
 
 
-class MUStARDDataset(BaseTriModalDataset):
+class MUStARDDataset(BaseMultiModalDataset):
     """
     MUStARD Dataset for multimodal sarcasm detection.
 
