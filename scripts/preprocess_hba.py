@@ -79,6 +79,9 @@ def tokenize(text: str) -> List[str]:
     """Simple tokenizer: lowercase + keep alnum and apostrophes."""
     return re.findall(r"[A-Za-z0-9']+", text.lower())
 
+
+def load_glove(glove_path: str) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    """Load GloVe txt file into memory and return (dict, unk_vector)."""
     embeddings: Dict[str, np.ndarray] = {}
     with open(glove_path, "r", encoding="utf-8") as f:
         for line in f:
