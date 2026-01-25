@@ -2,10 +2,10 @@
 # Batch preprocess all HBA sub-datasets with GloVe text features
 
 # Configuration
-GLOVE_PATH="${GLOVE_PATH:-glove.6B.300d.txt}"
-OUTPUT_DIR="${OUTPUT_DIR:-preprocessed_data}"
-TEXT_POLICY="${TEXT_POLICY:-problem}"
-FEATURE_ROOT="${FEATURE_ROOT:-}"
+GLOVE_PATH="glove/glove.6B.300d.txt"
+OUTPUT_DIR="preprocessed_data"
+TEXT_POLICY="problem"
+FEATURE_ROOT="/mnt/tidal-alsh-share2/usr/wangshanyong/hba/human_behavior_dataset/parts/extracted/human_behaviour_data"
 
 # Check if GloVe file exists
 if [ ! -f "$GLOVE_PATH" ]; then
@@ -23,7 +23,6 @@ fi
 # List of all supported datasets
 DATASETS=(
     "cremad"
-    "iemocap"
     "meld_emotion"
     "meld_senti"
     "chsimsv2"

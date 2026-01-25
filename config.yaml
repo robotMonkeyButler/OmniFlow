@@ -6,7 +6,7 @@
 # Model Architecture
 # ----------------------
 model:
-  type: "omni"            # "omni", "continuous", "discrete"
+  type: "continuous"            # "omni", "continuous", "discrete"
   d_model: 256
   nhead: 8
   num_layers: 4
@@ -172,7 +172,10 @@ training:
 # ----------------------
 dataset:
   # Dataset name: mosei, mosi, urfunny, iemocap, generic
-  name: "urfunny"
+  name: "cremad"
+
+  # feature root applies to dataloaders from hba
+  feature_root: "/mnt/tidal-alsh-share2/usr/wangshanyong/hba/human_behavior_dataset/parts/extracted/human_behaviour_data"
   
   # Task type (for MOSEI only): "SEN" (sentiment) or "EMO" (emotion)
   task: "SEN"
@@ -199,7 +202,7 @@ dataset:
   
   # Modality keys for generic dataset (optional override)
   modality_keys:
-    urfunny:
+    cremad:
       vis: "vision"
       aud: "audio"
       txt: "text"
